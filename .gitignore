@@ -1,0 +1,11 @@
+# 비밀 정보
+.env
+
+# 로컬 데이터(지침, 사례 DB, 첨부 문서) - 외부에 공개하지 않음
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
