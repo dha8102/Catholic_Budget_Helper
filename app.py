@@ -16,7 +16,8 @@ st.set_page_config(page_title="행정지침 검토 도우미", page_icon="📑",
 API_NOTICE = (
     "이 프로그램은 완전한 오프라인 프로그램이 아닙니다. AI 검토를 실행하면 업로드한 문서, 등록된 지침, "
     "관련 과거 사례의 내용이 외부 OpenAI API로 전송됩니다. 개인정보·민감정보가 포함된 문서는 전송 전에 확인하세요. "
-    "지침·사례 DB·첨부파일은 이 PC의 data 폴더에만 저장됩니다."
+    + ("지침·사례 DB·첨부파일은 서버 PC에 저장되며 접속한 모든 사람이 함께 봅니다."
+       if config.WEB_MODE else "지침·사례 DB·첨부파일은 이 PC의 data 폴더에만 저장됩니다.")
 )
 FILE_WARNING = (
     "저장된 문서의 파일명이나 폴더 위치를 임의로 변경하거나 파일을 삭제하면 이후 AI가 과거 사례의 원본 문서를 확인할 수 없습니다. "
@@ -50,6 +51,16 @@ def load_guideline(path: Path):
     return extract_cached(str(path), stat.st_mtime, stat.st_size)
 
 
+def make_client():
+    """웹 모드에서는 사용자가 화면에 입력한 API 키만 쓴다(서버 .env 키를 다른 사람이 쓰지 않도록)."""
+    if config.WEB_MODE:
+        key = (st.session_state.get("api_key") or "").strip()
+        if not key:
+            raise ai.AIError("왼쪽 메뉴의 'OpenAI API 키' 칸에 본인의 API 키를 입력한 뒤 다시 시도하세요.")
+        return ai.get_client(key)
+    return ai.get_client()
+
+
 def flash(msg: str, kind: str = "success"):
     st.session_state.setdefault("flash", []).append((kind, msg))
 
@@ -62,7 +73,8 @@ def show_flash():
 # ====================================================================== 화면 1. 지침 관리
 def page_guidelines():
     st.header("📚 지침 관리")
-    st.caption("교육부·지자체·교내 지침 파일을 등록합니다. 등록된 파일은 data/guidelines/ 폴더에 저장됩니다.")
+    st.caption("교육부·지자체·교내 지침 파일을 등록합니다. "
+               + ("등록된 지침은 접속한 모든 사람이 함께 사용합니다." if config.WEB_MODE else "등록된 파일은 data/guidelines/ 폴더에 저장됩니다."))
     show_flash()
 
     nonce = st.session_state.get("g_nonce", 0)
@@ -132,7 +144,7 @@ def read_upload(f, errors: list) -> dict | None:
 def run_steps(state: dict):
     st.session_state.review_error = None
     try:
-        client = ai.get_client()
+        client = make_client()
         with st.spinner("AI가 검토 중입니다: 지침 분석 → 과거 사례 선택 → 원본 문서 확인 → 추가 질문 생성 (수십 초~몇 분 걸릴 수 있습니다)"):
             review.run_review(state, client)
     except ai.AIError as e:
@@ -289,7 +301,7 @@ def show_review(state: dict):
         st.session_state.final_error = None
         try:
             with st.spinner("답변을 반영해 최종 의견을 작성 중입니다..."):
-                review.generate_final(state, answers, ai.get_client())
+                review.generate_final(state, answers, make_client())
         except ai.AIError as e:
             st.session_state.final_error = str(e)
         except Exception as e:
@@ -389,16 +401,29 @@ def page_cases():
                 st.rerun()
 
 
+# ====================================================================== 웹 모드
+def web_sidebar():
+    st.sidebar.text_input("OpenAI API 키", type="password", key="api_key", placeholder="sk-...",
+                          help="본인 키로 AI를 호출하며 요금도 본인 계정에 청구됩니다.")
+    st.sidebar.caption("API 키는 서버에 저장되지 않습니다. 페이지를 새로고침하면 다시 입력해야 합니다.")
+    if not (st.session_state.get("api_key") or "").strip():
+        st.sidebar.warning("AI 검토를 하려면 API 키를 입력하세요.")
+
+
 # ====================================================================== 메인
 def main():
     storage.init_storage()
     st.sidebar.title("📑 행정지침 검토 도우미")
+    if config.WEB_MODE:
+        web_sidebar()
+        st.sidebar.divider()
     page = st.sidebar.radio("화면 선택", ["신규 문서 검토", "지침 관리", "저장된 사례"], key="page")
     st.sidebar.divider()
     st.sidebar.caption(f"AI 모델: {config.OPENAI_MODEL}")
-    if not config.OPENAI_API_KEY:
-        st.sidebar.error("OPENAI_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
-    st.sidebar.caption(f"데이터 폴더: {storage.data_dir()}")
+    if not config.WEB_MODE:
+        if not config.OPENAI_API_KEY:
+            st.sidebar.error("OPENAI_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
+        st.sidebar.caption(f"데이터 폴더: {storage.data_dir()}")
     st.sidebar.caption("⚠️ AI 검토 시 문서 내용이 외부 OpenAI API로 전송됩니다.")
 
     if page == "지침 관리":

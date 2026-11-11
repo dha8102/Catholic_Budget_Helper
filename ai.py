@@ -26,10 +26,15 @@ class OpenAIClient:
 
         self.model = model
         self.client = OpenAI(api_key=api_key, timeout=timeout, max_retries=1)
+        # 호출별 소요 시간·토큰 기록 (비용 확인용, scripts/live_check.py에서 사용)
+        self.usage_log: list[dict] = []
 
     def complete_json(self, task: str, system: str, user: str) -> dict:
+        import time
+
         import openai
 
+        started = time.perf_counter()
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
@@ -44,18 +49,35 @@ class OpenAIClient:
             raise AIError("OpenAI 사용량 한도 또는 잔액이 부족합니다. 잠시 후 다시 시도하거나 결제 상태를 확인하세요.")
         except openai.APIConnectionError:
             raise AIError("OpenAI 서버에 연결할 수 없습니다. 인터넷 연결을 확인하세요.")
+        except openai.NotFoundError:
+            raise AIError(f"모델 '{self.model}'을(를) 사용할 수 없습니다. .env의 OPENAI_MODEL을 계정에서 사용 가능한 모델로 바꾸세요.")
+        except openai.BadRequestError as e:
+            if getattr(e, "code", None) == "context_length_exceeded" or "context length" in str(e).lower():
+                raise AIError(
+                    f"입력 분량이 모델 '{self.model}'의 입력 한도를 초과했습니다. 검토에 사용할 지침 수를 줄이거나 문서를 나누세요. "
+                    "이 오류가 반복되면 .env의 MAX_INPUT_CHARS를 모델 한도보다 작게 낮추면 AI 호출 전에 미리 알려 줍니다."
+                )
+            raise AIError(f"AI 호출 중 오류가 발생했습니다: {e}")
         except openai.OpenAIError as e:
             raise AIError(f"AI 호출 중 오류가 발생했습니다: {e}")
 
+        usage = getattr(resp, "usage", None)
+        self.usage_log.append({
+            "task": task,
+            "seconds": round(time.perf_counter() - started, 1),
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+        })
         choice = resp.choices[0]
         if choice.finish_reason == "length":
             raise AIFormatError("AI 응답이 길이 제한으로 잘렸습니다. 다시 시도하거나 문서 분량을 줄여 주세요.")
         return parse_json(choice.message.content or "")
 
 
-def get_client():
-    """실제 OpenAI 클라이언트를 만든다. (테스트에서는 이 함수를 가짜 AI로 바꿔 끼운다)"""
-    return OpenAIClient(config.OPENAI_API_KEY, config.OPENAI_MODEL, config.OPENAI_TIMEOUT)
+def get_client(api_key: str | None = None):
+    """실제 OpenAI 클라이언트를 만든다. (테스트에서는 이 함수를 가짜 AI로 바꿔 끼운다)
+    api_key를 주면 그 키를 쓰고(웹 모드: 사용자가 화면에 입력한 키), 없으면 .env의 키를 쓴다."""
+    return OpenAIClient(api_key if api_key is not None else config.OPENAI_API_KEY, config.OPENAI_MODEL, config.OPENAI_TIMEOUT)
 
 
 def parse_json(text: str) -> dict:

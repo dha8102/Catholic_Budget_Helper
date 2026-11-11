@@ -261,3 +261,41 @@ def test_openai_client_errors_become_user_messages(monkeypatch):
     c, _ = _client_with(monkeypatch, lambda: _Resp("not json"))
     with pytest.raises(ai.AIFormatError):
         c.complete_json("t", "s", "u")
+
+
+def _status_error(cls, message, code=None):
+    # SDK 버전마다 생성자 인자가 달라 생성자를 거치지 않고 만든다
+    e = cls.__new__(cls)
+    Exception.__init__(e, message)
+    e.code = code
+    return e
+
+
+def test_openai_client_context_and_model_errors(monkeypatch):
+    import openai
+
+    def too_long():
+        raise _status_error(openai.BadRequestError, "This model's maximum context length is 128000 tokens.", "context_length_exceeded")
+
+    c, _ = _client_with(monkeypatch, too_long)
+    with pytest.raises(ai.AIError, match="MAX_INPUT_CHARS"):
+        c.complete_json("t", "s", "u")
+
+    def no_model():
+        raise _status_error(openai.NotFoundError, "The model does not exist", "model_not_found")
+
+    c, _ = _client_with(monkeypatch, no_model)
+    with pytest.raises(ai.AIError, match="OPENAI_MODEL"):
+        c.complete_json("t", "s", "u")
+
+
+def test_openai_client_records_usage(monkeypatch):
+    def ok():
+        r = _Resp('{"ok": true}')
+        r.usage = type("U", (), {"prompt_tokens": 120, "completion_tokens": 30})()
+        return r
+
+    c, _ = _client_with(monkeypatch, ok)
+    c.complete_json("guideline_review", "s", "u")
+    assert c.usage_log[0]["task"] == "guideline_review"
+    assert (c.usage_log[0]["prompt_tokens"], c.usage_log[0]["completion_tokens"]) == (120, 30)
