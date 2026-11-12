@@ -299,3 +299,11 @@ def test_openai_client_records_usage(monkeypatch):
     c.complete_json("guideline_review", "s", "u")
     assert c.usage_log[0]["task"] == "guideline_review"
     assert (c.usage_log[0]["prompt_tokens"], c.usage_log[0]["completion_tokens"]) == (120, 30)
+
+
+def test_compliant_with_open_questions_becomes_undecidable():
+    data = {"items": [{"expense_item": "회의비", "amount": 1, "status": "적합", "unclear_points": ["참석자 명단 확인"]},
+                      {"expense_item": "식비", "amount": 2, "status": "적합", "unclear_points": []}]}
+    items = ai.normalize_review(data, [{"name": "g", "text": "지침"}])["items"]
+    assert items[0]["status"] == "판단 불가" and "확인이 필요한 사항" in items[0]["reasoning"]
+    assert items[1]["status"] == "적합"

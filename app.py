@@ -51,14 +51,70 @@ def load_guideline(path: Path):
     return extract_cached(str(path), stat.st_mtime, stat.st_size)
 
 
+# ---------------------------------------------------------------- 환경 설정 (브라우저 쿠키에 저장)
+# 설정은 접속한 브라우저에만 저장된다. 같은 서버에 접속한 다른 사람에게 내 API 키가 공유되지 않는다.
+MODEL_CHOICES = ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.5"]
+THEMES = {"시스템 설정 따르기": "System", "라이트": "Light", "다크": "Dark"}
+COOKIE = {"api_key": "cbh_api_key", "model": "cbh_model", "theme": "cbh_theme"}
+COOKIE_DAYS = 365
+
+
+def model_choices() -> list[str]:
+    return MODEL_CHOICES if config.OPENAI_MODEL in MODEL_CHOICES else [config.OPENAI_MODEL] + MODEL_CHOICES
+
+
+def settings() -> dict:
+    """현재 세션의 설정. 처음 접속하면 브라우저 쿠키에서 불러온다."""
+    if "settings" not in st.session_state:
+        from urllib.parse import unquote
+
+        try:
+            cookies = dict(st.context.cookies)
+        except Exception:
+            cookies = {}
+        get = lambda k: unquote(cookies.get(COOKIE[k], "") or "").strip()  # noqa: E731
+        model = get("model")
+        theme = get("theme")
+        st.session_state.settings = {
+            "api_key": get("api_key"),
+            "model": model if model in model_choices() else config.OPENAI_MODEL,
+            "theme": theme if theme in THEMES.values() else "System",
+        }
+    return st.session_state.settings
+
+
+def _js_str(value: str) -> str:
+    import json
+
+    return json.dumps(value).replace("<", "\\u003c")
+
+
+def apply_browser_settings(s: dict, reload: bool) -> None:
+    """설정을 쿠키에 저장하고, Streamlit 테마를 바꾼다(테마가 바뀌면 페이지를 새로고침)."""
+    max_age = COOKIE_DAYS * 24 * 3600
+    lines = [
+        f"document.cookie = {_js_str(COOKIE[k])} + '=' + encodeURIComponent({_js_str(s[k])}) + '; max-age={max_age}; path=/; SameSite=Strict';"
+        for k in COOKIE
+    ]
+    lines.append(f"localStorage.setItem('stActiveTheme-' + window.location.pathname + '-v2', JSON.stringify({_js_str(s['theme'])}));")
+    if reload:
+        lines.append("setTimeout(function () { window.location.reload(); }, 300);")
+    st.html("<script>" + "\n".join(lines) + "</script>", unsafe_allow_javascript=True)
+
+
+def current_api_key() -> str:
+    """환경 설정의 키. 혼자 쓰기 모드에서는 비어 있으면 .env 키를 쓴다(웹 모드에서는 서버 키를 쓰지 않음)."""
+    key = settings()["api_key"]
+    if not key and not config.WEB_MODE:
+        key = config.OPENAI_API_KEY
+    return key
+
+
 def make_client():
-    """웹 모드에서는 사용자가 화면에 입력한 API 키만 쓴다(서버 .env 키를 다른 사람이 쓰지 않도록)."""
-    if config.WEB_MODE:
-        key = (st.session_state.get("api_key") or "").strip()
-        if not key:
-            raise ai.AIError("왼쪽 메뉴의 'OpenAI API 키' 칸에 본인의 API 키를 입력한 뒤 다시 시도하세요.")
-        return ai.get_client(key)
-    return ai.get_client()
+    key = current_api_key()
+    if not key:
+        raise ai.AIError("'환경 설정' 화면에서 OpenAI API 키를 입력·저장한 뒤 다시 시도하세요.")
+    return ai.get_client(api_key=key, model=settings()["model"])
 
 
 def flash(msg: str, kind: str = "success"):
@@ -73,8 +129,8 @@ def show_flash():
 # ====================================================================== 화면 1. 지침 관리
 def page_guidelines():
     st.header("📚 지침 관리")
-    st.caption("교육부·지자체·교내 지침 파일을 등록합니다. "
-               + ("등록된 지침은 접속한 모든 사람이 함께 사용합니다." if config.WEB_MODE else "등록된 파일은 data/guidelines/ 폴더에 저장됩니다."))
+    st.caption("교육부·지자체·교내 지침 파일을 등록합니다."
+               + ("" if config.WEB_MODE else " 등록된 파일은 data/guidelines/ 폴더에 저장됩니다."))
     show_flash()
 
     nonce = st.session_state.get("g_nonce", 0)
@@ -235,7 +291,13 @@ def show_review(state: dict):
         st.warning(f"지침 간 적용 관계: {initial['guideline_priority_note']}")
     if not initial["items"]:
         st.info("문서에서 예산 집행항목을 찾지 못했습니다.")
-    for it in initial["items"]:
+    ok_items = [i for i in initial["items"] if i["status"] == "적합"]
+    shown = [i for i in initial["items"] if i["status"] != "적합"]
+    if ok_items:
+        st.caption(f"'적합' 판정 {len(ok_items)}개 항목은 표시하지 않습니다: " + ", ".join(i["expense_item"] for i in ok_items))
+    if initial["items"] and not shown:
+        st.success("모든 항목이 '적합'으로 검토되어 확인이 필요한 항목이 없습니다.")
+    for it in shown:
         with st.container(border=True):
             c1, c2, c3 = st.columns([4, 2, 2])
             c1.markdown(f"**항목 {it['item_no']}. {esc(it['expense_item'])}**")
@@ -293,8 +355,11 @@ def show_review(state: dict):
             st.caption(detail)
             if q["past_case_comparison"]:
                 st.caption(f"과거 사례 비교: {q['past_case_comparison']}")
-            answers[q["item_no"]] = st.text_area("담당자 답변", key=f"answer_{state['id']}_{q['item_no']}",
+            # 다른 화면(예: 환경 설정)에 다녀와도 입력한 답변이 지워지지 않도록 따로 보관한다.
+            store = st.session_state.setdefault("answer_store", {}).setdefault(state["id"], {})
+            answers[q["item_no"]] = st.text_area("담당자 답변", value=store.get(q["item_no"], ""), key=f"answer_{state['id']}_{q['item_no']}",
                                                  placeholder="예: 내부 회의를 거쳐 사업단장 재가를 받았습니다. (회의록 첨부)")
+            store[q["item_no"]] = answers[q["item_no"]]
 
     # 버튼을 비활성화하지 않는다: 입력 직후 클릭하면 입력값이 확정되기 전이라 첫 클릭이 무시되기 때문
     if st.button("💬 답변 반영 및 최종 의견 생성", type="primary"):
@@ -317,15 +382,25 @@ def show_review(state: dict):
 
     # ---------------- 사례 DB 저장
     st.subheader("5. 사례 DB 저장")
-    st.caption("저장 대상: '위반 가능성' 또는 '판단 불가' 항목 중 AI 질문에 답변한 항목. 업로드한 문서는 data/documents/ 에 함께 보관됩니다.")
+    st.caption("'위반 가능성' 또는 '판단 불가' 항목 중 AI 질문에 답변한 항목을 저장할 수 있습니다. 저장할 항목을 선택하세요. "
+               "업로드한 문서는 data/documents/ 에 함께 보관됩니다.")
     st.warning(FILE_WARNING)
     changed = review.answers_changed(state, answers)
     if changed:
         st.warning("최종 의견을 만든 뒤 답변이 바뀌었습니다. '답변 반영 및 최종 의견 생성'을 다시 눌러야 저장할 수 있습니다.")
     records = review.build_case_records(state)
-    if st.button("💾 사례 DB 저장", disabled=changed or not records or bool(state.get("saved"))):
+    finals = {f["item_no"]: f["final_status"] for f in final["result"]["items"]}
+    selected = []
+    for rec in records:
+        no = rec["item_no"]
+        label = f"항목 {no}. {rec['expense_item']} · {won(rec['amount'])} — 최초 '{items[no]['status']}' → 최종 '{finals.get(no, '-')}'"
+        if st.checkbox(label, value=True, key=f"save_sel_{state['id']}_{no}", disabled=bool(state.get("saved"))):
+            selected.append(no)
+    if not records:
+        st.caption("저장할 수 있는 항목이 없습니다.")
+    if st.button("💾 선택한 사례 DB 저장", disabled=changed or not selected or bool(state.get("saved"))):
         try:
-            review.save_review(state)
+            review.save_review(state, selected)
         except Exception as e:
             st.error(f"저장 중 오류가 발생해 저장을 취소했습니다(부분 저장된 내용은 정리했습니다): {e}")
         else:
@@ -383,8 +458,14 @@ def page_cases():
             st.markdown(esc(c["ai_question"]))
             st.markdown("**담당자 답변**")
             st.markdown(esc(c["user_answer"]))
-            st.markdown("**지침 검토 결과**")
-            st.code(c["review_result"] or "", language=None, wrap_lines=True)
+            st.markdown("**지침 검토 결과** (직접 수정 가능)")
+            edited = st.text_area("지침 검토 결과", value=c["review_result"] or "", height=300,
+                                  key=f"edit_rr_{c['id']}", label_visibility="collapsed")
+            st.caption("수정한 검토 결과는 이후 AI가 이 사례를 과거 사례로 참고할 때 그대로 사용됩니다.")
+            if st.button("검토 결과 수정 저장", key=f"save_rr_{c['id']}", disabled=edited == (c["review_result"] or "")):
+                storage.update_case_review(c["id"], edited)
+                flash(f"사례 #{c['id']}의 검토 결과를 수정했습니다.")
+                st.rerun()
             st.markdown("**관련 파일**")
             if not c["file_paths"]:
                 st.caption("저장된 파일 없음")
@@ -401,35 +482,55 @@ def page_cases():
                 st.rerun()
 
 
-# ====================================================================== 웹 모드
-def web_sidebar():
-    st.sidebar.text_input("OpenAI API 키", type="password", key="api_key", placeholder="sk-...",
-                          help="본인 키로 AI를 호출하며 요금도 본인 계정에 청구됩니다.")
-    st.sidebar.caption("API 키는 서버에 저장되지 않습니다. 페이지를 새로고침하면 다시 입력해야 합니다.")
-    if not (st.session_state.get("api_key") or "").strip():
-        st.sidebar.warning("AI 검토를 하려면 API 키를 입력하세요.")
+# ====================================================================== 화면 4. 환경 설정
+def page_settings():
+    st.header("⚙️ 환경 설정")
+    st.caption("설정은 지금 사용하는 브라우저에만 저장되어 다음에 접속해도 유지됩니다. 다른 사람·다른 PC에는 공유되지 않습니다.")
+    show_flash()
+    s = settings()
+    labels = list(THEMES)
+    theme_label = st.radio("화면 테마", labels, index=list(THEMES.values()).index(s["theme"]), horizontal=True, key="set_theme")
+    choices = model_choices()
+    model = st.selectbox("AI 모델", choices, index=choices.index(s["model"]), key="set_model",
+                         help="모델마다 판정 품질·속도·요금이 다릅니다. 바꾼 뒤에는 샘플 문서로 한 번 결과를 확인해 보세요.")
+    api_key = st.text_input("OpenAI API 키", value=s["api_key"], type="password", key="set_api_key", placeholder="sk-...",
+                            help="https://platform.openai.com/api-keys 에서 발급. AI 요금은 이 키의 계정에 청구됩니다.")
+    if not config.WEB_MODE and not api_key.strip() and config.OPENAI_API_KEY:
+        st.caption("비워 두면 .env 파일의 API 키를 사용합니다.")
+    st.warning("API 키는 이 브라우저의 쿠키에 저장됩니다. 여러 사람이 함께 쓰는 PC라면 사용 후 키를 지우고 저장하세요.")
+    if st.button("설정 저장", type="primary"):
+        new = {"api_key": api_key.strip(), "model": model, "theme": THEMES[theme_label]}
+        theme_changed = new["theme"] != s["theme"]
+        st.session_state.settings = new
+        st.session_state.pending_settings = theme_changed
+        flash("설정을 저장했습니다." + (" 테마를 적용하기 위해 화면을 새로고침합니다." if theme_changed else ""))
+        st.rerun()
 
 
 # ====================================================================== 메인
+PAGES = ["신규 문서 검토", "지침 관리", "저장된 사례", "환경 설정"]
+
+
 def main():
     storage.init_storage()
+    s = settings()
+    if "pending_settings" in st.session_state:  # 저장 직후 한 번만 브라우저에 반영
+        apply_browser_settings(s, reload=st.session_state.pop("pending_settings"))
     st.sidebar.title("📑 행정지침 검토 도우미")
-    if config.WEB_MODE:
-        web_sidebar()
-        st.sidebar.divider()
-    page = st.sidebar.radio("화면 선택", ["신규 문서 검토", "지침 관리", "저장된 사례"], key="page")
+    page = st.sidebar.radio("화면 선택", PAGES, key="page")
     st.sidebar.divider()
-    st.sidebar.caption(f"AI 모델: {config.OPENAI_MODEL}")
+    st.sidebar.caption(f"AI 모델: {s['model']}")
+    if not current_api_key():
+        st.sidebar.warning("AI 검토를 하려면 '환경 설정'에서 OpenAI API 키를 입력하세요.")
     if not config.WEB_MODE:
-        if not config.OPENAI_API_KEY:
-            st.sidebar.error("OPENAI_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
         st.sidebar.caption(f"데이터 폴더: {storage.data_dir()}")
-    st.sidebar.caption("⚠️ AI 검토 시 문서 내용이 외부 OpenAI API로 전송됩니다.")
 
     if page == "지침 관리":
         page_guidelines()
     elif page == "저장된 사례":
         page_cases()
+    elif page == "환경 설정":
+        page_settings()
     else:
         page_review()
 

@@ -74,10 +74,10 @@ class OpenAIClient:
         return parse_json(choice.message.content or "")
 
 
-def get_client(api_key: str | None = None):
+def get_client(api_key: str | None = None, model: str | None = None):
     """실제 OpenAI 클라이언트를 만든다. (테스트에서는 이 함수를 가짜 AI로 바꿔 끼운다)
-    api_key를 주면 그 키를 쓰고(웹 모드: 사용자가 화면에 입력한 키), 없으면 .env의 키를 쓴다."""
-    return OpenAIClient(api_key if api_key is not None else config.OPENAI_API_KEY, config.OPENAI_MODEL, config.OPENAI_TIMEOUT)
+    api_key·model을 주면 그 값을 쓰고(화면의 환경 설정), 없으면 .env 값을 쓴다."""
+    return OpenAIClient(api_key if api_key is not None else config.OPENAI_API_KEY, model or config.OPENAI_MODEL, config.OPENAI_TIMEOUT)
 
 
 def parse_json(text: str) -> dict:
@@ -157,10 +157,13 @@ def build_review_prompt(guidelines: list[dict], documents: list[dict]) -> str:
 {STATUS_DEFINITIONS}
 
 규칙:
-- 집행항목은 금액이 붙은 예산 집행 단위(예: 자문회의 참석수당, 회의비 식대)로 나누세요.
+- 집행항목은 금액이 붙은 예산 집행 단위(예: 자문회의 참석수당, 회의비 식대)로 나누고, 문서에 나온 집행항목을 하나도 빠뜨리지 말고 모두 items에 넣으세요.
+- 금액과 직접 연결되지 않는 문제(증빙·서명·결재 누락, 절차 문제, 지침 간 충돌 등)도 빠뜨리지 마세요.
+  관련 집행항목의 unclear_points에 적고, 관련 항목이 없으면 별도 항목(amount는 null)으로 만드세요.
+- 확인이 필요한 사항이 하나라도 있으면 "적합"이 아니라 "판단 불가" 또는 "위반 가능성"으로 분류하세요. "적합"은 unclear_points가 빈 배열일 때만 쓰세요.
 - related_guidelines의 quote는 지침 원문에서 그대로 복사한 문장이어야 합니다(요약·변형 금지). 근거가 없으면 빈 배열로 두세요.
 - amount는 원 단위 정수(쉼표, '원' 없이). 금액을 알 수 없으면 null.
-- unclear_points에는 담당자에게 확인이 필요한 사항을 적으세요. 적합 항목은 보통 빈 배열입니다.
+- unclear_points에는 담당자에게 확인이 필요한 사항을 적으세요. 적합 항목은 빈 배열입니다.
 - 지침 간 적용 관계가 문제 되면 guideline_priority_note에 적으세요(문제 없으면 빈 문자열).
 
 출력 JSON 형식:
@@ -373,6 +376,12 @@ def normalize_review(data: dict, guidelines: list[dict]) -> dict:
                 quote = _text(ref.get("quote"))
                 # AI가 인용한 문장이 실제 지침 원문에 있는지 확인(조항을 지어내는 것 방지)
                 refs.append({"guideline": _text(ref.get("guideline")), "quote": quote, "verified": _squash(quote) in all_guidelines})
+        unclear = _text_list(raw.get("unclear_points"))
+        reasoning = _text(raw.get("reasoning"))
+        if status == "적합" and unclear:
+            # 확인할 사항이 남아 있는데 '적합'이면 화면에서 숨겨져 질문도 생기지 않으므로 '판단 불가'로 바꾼다.
+            status = "판단 불가"
+            reasoning = (reasoning + " " if reasoning else "") + "(AI가 '적합'으로 표시했으나 확인이 필요한 사항이 있어 '판단 불가'로 분류함)"
         items.append(
             {
                 "item_no": idx,
@@ -381,8 +390,8 @@ def normalize_review(data: dict, guidelines: list[dict]) -> dict:
                 "purpose": _text(raw.get("purpose")),
                 "status": status,
                 "related_guidelines": refs,
-                "reasoning": _text(raw.get("reasoning")),
-                "unclear_points": _text_list(raw.get("unclear_points")),
+                "reasoning": reasoning,
+                "unclear_points": unclear,
             }
         )
     return {

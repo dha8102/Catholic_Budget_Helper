@@ -28,7 +28,7 @@ def test_question_answer_final_save_flow(data_dir, monkeypatch):
         "questions": QUESTIONS,
         "final_opinion": final_response(),
     })
-    monkeypatch.setattr(ai, "get_client", lambda: fake)
+    monkeypatch.setattr(ai, "get_client", lambda **kw: fake)
     state = review.new_state(load_doc("test2_자문수당/기안문_자문회의.txt"),
                              [load_doc("test2_자문수당/결과보고서_자문회의.docx")], load_guidelines())
     review.run_review(state, fake)
@@ -73,7 +73,7 @@ def test_saved_cases_page_with_missing_file(data_dir):
 
 
 def test_ai_error_is_shown_not_crash(data_dir, monkeypatch):
-    def broken():
+    def broken(**kw):
         raise ai.AIError("OPENAI_API_KEY가 설정되지 않았습니다.")
 
     monkeypatch.setattr(ai, "get_client", broken)
@@ -88,3 +88,56 @@ def test_ai_error_is_shown_not_crash(data_dir, monkeypatch):
     at.run()
     assert not at.exception
     assert any("OPENAI_API_KEY" in e.value for e in at.error)
+
+
+# ---------------------------------------------------------------- 화면 개선 (적합 숨김, 저장 항목 선택, 검토 결과 수정)
+def _two_item_state(fake):
+    data = review_response("자문회의 참석수당", 300000, "판단 불가", unclear=["산정 근거"])
+    data["items"].append({**data["items"][0], "item_no": 2, "expense_item": "회의 식비", "amount": 90000, "status": "적합", "unclear_points": []})
+    data["items"].append({**data["items"][0], "item_no": 3, "expense_item": "다과비", "amount": 50000, "status": "위반 가능성"})
+    fake.responses["guideline_review"] = data
+    state = review.new_state(load_doc("test2_자문수당/기안문_자문회의.txt"), [], load_guidelines())
+    review.run_review(state, fake)
+    return state
+
+
+def test_compliant_items_hidden_and_save_selected_only(data_dir, monkeypatch):
+    questions = {"questions": [{**QUESTIONS["questions"][0], "item_no": 1}, {**QUESTIONS["questions"][0], "item_no": 3}]}
+    final = final_response()
+    final["items"].append({**final["items"][0], "item_no": 3})
+    fake = FakeAI({"questions": questions, "final_opinion": final})
+    monkeypatch.setattr(ai, "get_client", lambda **kw: fake)
+    state = _two_item_state(fake)
+
+    at = new_app()
+    at.session_state["review"] = state
+    at.run()
+    titles = [m.value for m in at.markdown]
+    assert not any("회의 식비" in t for t in titles)  # 적합 항목 카드는 표시하지 않음
+    assert any("'적합' 판정 1개 항목은 표시하지 않습니다" in c.value for c in at.caption)
+
+    at.text_area(key=f"answer_{state['id']}_1").input("재가 받음")
+    at.text_area(key=f"answer_{state['id']}_3").input("회의 후 다과 제공")
+    next(b for b in at.button if "최종 의견" in b.label).click()
+    at.run()
+    at.checkbox(key=f"save_sel_{state['id']}_3").uncheck()
+    at.run()
+    next(b for b in at.button if "사례 DB 저장" in b.label).click()
+    at.run()
+    assert not at.exception
+    assert [c["expense_item"] for c in storage.list_cases()] == ["자문회의 참석수당"]
+
+
+def test_edit_saved_review_result(data_dir):
+    storage.save_cases([{"business_name": "사업", "expense_item": "자문수당", "amount": 1, "review_result": "원래 결과",
+                         "ai_question": "q", "user_answer": "a"}], [])
+    at = new_app()
+    at.session_state["page"] = "저장된 사례"
+    at.run()
+    assert next(b for b in at.button if b.label == "검토 결과 수정 저장").disabled  # 고치기 전에는 비활성
+    at.text_area(key="edit_rr_1").input("담당자가 고친 결과")
+    at.run()
+    next(b for b in at.button if b.label == "검토 결과 수정 저장").click()
+    at.run()
+    assert not at.exception
+    assert storage.list_cases()[0]["review_result"] == "담당자가 고친 결과"

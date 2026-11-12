@@ -21,6 +21,8 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PAST_DOC_MAX_CHARS", 20_000)
     monkeypatch.setattr(config, "MAX_SELECTED_CASES", 5)
     monkeypatch.setattr(config, "MAX_FILE_MB", 20)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test-env")  # 실제 .env 키에 영향받지 않게
+    monkeypatch.setattr(config, "OPENAI_MODEL", "gpt-6-luna")
     storage.init_storage()
     return tmp_path / "data"
 
