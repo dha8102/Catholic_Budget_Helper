@@ -5,7 +5,7 @@ from streamlit.testing.v1 import AppTest
 import ai
 import review
 import storage
-from conftest import QUESTIONS, ROOT, FakeAI, final_response, load_doc, load_guidelines, review_response
+from conftest import goto, QUESTIONS, ROOT, FakeAI, final_response, load_doc, load_guidelines, review_response
 
 
 def new_app():
@@ -16,10 +16,9 @@ def test_all_pages_render(data_dir):
     storage.save_guideline("지침.txt", "제1조 회의비는 1인당 30,000원 이내".encode())
     at = new_app().run()
     assert not at.exception
-    for page in ["지침 관리", "저장된 사례", "신규 문서 검토"]:
-        at.radio(key="page").set_value(page).run()
+    for page in ["지침 관리", "저장된 사례", "환경 설정", "신규 문서 검토"]:
+        goto(at, page)
         assert not at.exception, page
-    assert any("외부 OpenAI API" in i.value for i in at.info)
 
 
 def test_question_answer_final_save_flow(data_dir, monkeypatch):
@@ -56,7 +55,7 @@ def test_question_answer_final_save_flow(data_dir, monkeypatch):
     # 저장 버튼이 비활성화되어 연속 클릭으로 중복 저장되지 않음
     assert next(b for b in at.button if "사례 DB 저장" in b.label).disabled
 
-    at.radio(key="page").set_value("저장된 사례").run()
+    goto(at, "저장된 사례")
     assert not at.exception
     assert any("#1" in e.label for e in at.expander)
 

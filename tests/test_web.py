@@ -5,7 +5,7 @@ from streamlit.testing.v1 import AppTest
 import ai
 import config
 import review
-from conftest import QUESTIONS, ROOT, FakeAI, final_response, load_doc, load_guidelines, review_response
+from conftest import goto, QUESTIONS, ROOT, FakeAI, final_response, load_doc, load_guidelines, review_response
 
 
 @pytest.fixture
@@ -21,10 +21,9 @@ def new_app():
 def test_pages_open_without_login(web):
     at = new_app().run()
     assert not at.exception
-    for page in ["지침 관리", "저장된 사례", "신규 문서 검토"]:
-        at.radio(key="page").set_value(page).run()
+    for page in ["지침 관리", "저장된 사례", "환경 설정", "신규 문서 검토"]:
+        goto(at, page)
         assert not at.exception, page
-    assert any("함께 봅니다" in i.value for i in at.info)
     assert any("API 키" in w.value for w in at.sidebar.warning)  # 키가 없으면 안내
 
 
@@ -46,7 +45,7 @@ def test_ai_uses_users_own_key(web, monkeypatch):
     assert any("API 키" in e.value for e in at.error) and keys == []  # 키 없으면 서버 키로 호출하지 않음
 
     # 환경 설정 화면에서 키·모델 저장
-    at.radio(key="page").set_value("환경 설정").run()
+    goto(at, "환경 설정")
     at.text_input(key="set_api_key").input("sk-user-key")
     at.selectbox(key="set_model").set_value("gpt-5.5")
     next(b for b in at.button if b.label == "설정 저장").click()
@@ -54,7 +53,7 @@ def test_ai_uses_users_own_key(web, monkeypatch):
     assert not at.exception
     assert at.session_state["settings"] == {"api_key": "sk-user-key", "model": "gpt-5.5", "theme": "System"}
 
-    at.radio(key="page").set_value("신규 문서 검토").run()
+    goto(at, "신규 문서 검토")
     next(b for b in at.button if b.label == button).click()
     at.run()
     assert not at.exception

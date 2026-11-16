@@ -13,12 +13,6 @@ import storage
 
 st.set_page_config(page_title="행정지침 검토 도우미", page_icon="📑", layout="wide")
 
-API_NOTICE = (
-    "이 프로그램은 완전한 오프라인 프로그램이 아닙니다. AI 검토를 실행하면 업로드한 문서, 등록된 지침, "
-    "관련 과거 사례의 내용이 외부 OpenAI API로 전송됩니다. 개인정보·민감정보가 포함된 문서는 전송 전에 확인하세요. "
-    + ("지침·사례 DB·첨부파일은 서버 PC에 저장되며 접속한 모든 사람이 함께 봅니다."
-       if config.WEB_MODE else "지침·사례 DB·첨부파일은 이 PC의 data 폴더에만 저장됩니다.")
-)
 FILE_WARNING = (
     "저장된 문서의 파일명이나 폴더 위치를 임의로 변경하거나 파일을 삭제하면 이후 AI가 과거 사례의 원본 문서를 확인할 수 없습니다. "
     "해당 폴더의 파일은 프로그램을 통해 관리해 주세요."
@@ -129,8 +123,6 @@ def show_flash():
 # ====================================================================== 화면 1. 지침 관리
 def page_guidelines():
     st.header("📚 지침 관리")
-    st.caption("교육부·지자체·교내 지침 파일을 등록합니다."
-               + ("" if config.WEB_MODE else " 등록된 파일은 data/guidelines/ 폴더에 저장됩니다."))
     show_flash()
 
     nonce = st.session_state.get("g_nonce", 0)
@@ -211,7 +203,6 @@ def run_steps(state: dict):
 
 def page_review():
     st.header("📝 신규 문서 검토")
-    st.info(API_NOTICE)
 
     # ---------------- 상단: 문서 업로드
     st.subheader("1. 문서 업로드")
@@ -493,6 +484,7 @@ def page_settings():
     choices = model_choices()
     model = st.selectbox("AI 모델", choices, index=choices.index(s["model"]), key="set_model",
                          help="모델마다 판정 품질·속도·요금이 다릅니다. 바꾼 뒤에는 샘플 문서로 한 번 결과를 확인해 보세요.")
+    st.markdown("[모델 정보 확인하기 (ChatGPT API Platform)](https://platform.openai.com/home)")
     api_key = st.text_input("OpenAI API 키", value=s["api_key"], type="password", key="set_api_key", placeholder="sk-...",
                             help="https://platform.openai.com/api-keys 에서 발급. AI 요금은 이 키의 계정에 청구됩니다.")
     if not config.WEB_MODE and not api_key.strip() and config.OPENAI_API_KEY:
@@ -509,6 +501,35 @@ def page_settings():
 
 # ====================================================================== 메인
 PAGES = ["신규 문서 검토", "지침 관리", "저장된 사례", "환경 설정"]
+NAV_KEYS = {"신규 문서 검토": "nav_review", "지침 관리": "nav_guidelines",
+            "저장된 사례": "nav_cases", "환경 설정": "nav_settings"}
+
+# 사이드바 내용을 세로로 늘려 '환경 설정' 영역을 맨 아래에 붙인다.
+SIDEBAR_CSS = """<style>
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+  box-sizing: border-box; min-height: calc(100vh - 4.5rem); display: flex; flex-direction: column;
+  padding-bottom: 1.5rem;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] > div {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
+  flex: 1 1 auto;
+}
+section[data-testid="stSidebar"] [data-testid="stLayoutWrapper"]:has(> .st-key-sidebar_bottom) {
+  margin-top: auto;
+}
+</style>"""
+
+
+def _go(page: str):
+    st.session_state.page = page
+
+
+def nav_button(container, page: str):
+    current = st.session_state.page == page
+    container.button(page, key=NAV_KEYS[page], width="stretch",
+                     type="primary" if current else "secondary", on_click=_go, args=(page,))
 
 
 def main():
@@ -516,14 +537,21 @@ def main():
     s = settings()
     if "pending_settings" in st.session_state:  # 저장 직후 한 번만 브라우저에 반영
         apply_browser_settings(s, reload=st.session_state.pop("pending_settings"))
+    if st.session_state.get("page") not in PAGES:
+        st.session_state.page = PAGES[0]
+    st.html(SIDEBAR_CSS)
     st.sidebar.title("📑 행정지침 검토 도우미")
-    page = st.sidebar.radio("화면 선택", PAGES, key="page")
+    for p in PAGES[:-1]:
+        nav_button(st.sidebar, p)
     st.sidebar.divider()
     st.sidebar.caption(f"AI 모델: {s['model']}")
     if not current_api_key():
         st.sidebar.warning("AI 검토를 하려면 '환경 설정'에서 OpenAI API 키를 입력하세요.")
     if not config.WEB_MODE:
         st.sidebar.caption(f"데이터 폴더: {storage.data_dir()}")
+    bottom = st.sidebar.container(key="sidebar_bottom")
+    nav_button(bottom, "환경 설정")
+    page = st.session_state.page
 
     if page == "지침 관리":
         page_guidelines()
