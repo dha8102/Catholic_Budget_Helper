@@ -305,7 +305,7 @@ def show_review(state: dict):
             else:
                 st.markdown("**관련 지침:** 제공된 지침에서 근거를 찾지 못함")
             if it["unclear_points"]:
-                st.markdown("**추가 확인 필요:** " + esc(" / ".join(it["unclear_points"])))
+                st.markdown("**추가 확인 필요**\n" + bullets(it["unclear_points"]))
 
     st.markdown("#### 관련 과거 사례")
     sel = state.get("selection")
@@ -413,23 +413,31 @@ def show_final(state: dict, final: dict, items: dict):
     st.subheader("4. 최종 검토 의견")
     st.caption(review.DISCLAIMER)
     with st.container(border=True):
-        st.markdown(f"**주요 검토 내용**  \n{esc(ov['summary'])}")
-        st.markdown(f"**문제 가능성이 있는 항목**  \n{esc(ov['problem_items'])}")
-        st.markdown(f"**과거 유사 사례**  \n{esc(ov['past_cases_summary'] or '없음')}")
-        st.markdown(f"**사용자 답변 반영 결과**  \n{esc(ov['answer_reflection'])}")
+        st.markdown(f"**종합 결론:** {esc(ov['summary'])}")
+        rows = [("문제 항목", ov["problem_items"]), ("답변 반영", ov["answer_reflection"]), ("참고 사례", ov["past_cases_summary"])]
+        st.markdown(labeled_rows(rows))
         if ov["additional_checks"]:
-            st.markdown("**추가 확인사항**\n" + "\n".join(f"- {esc(x)}" for x in ov["additional_checks"]))
+            st.markdown("**추가 확인사항**\n" + bullets(ov["additional_checks"]))
     for f in res["items"]:
         it = items[f["item_no"]]
         with st.expander(f"항목 {f['item_no']}. {it['expense_item']} — 최초 '{it['status']}' → 최종 '{f['final_status']}'", expanded=True):
             if f["status_note"]:
                 st.warning(f["status_note"])
-            st.markdown(f"1. **지침 검토 결과:** {esc(f['guideline_review'])}")
-            st.markdown(f"2. **담당자가 설명한 집행 사유:** {esc(f['user_explanation'])}")
-            st.markdown(f"3. **관련 과거 사례(관행 — 지침 근거와 별개):** {esc(f['related_past_cases'] or '없음')}")
-            st.markdown(f"4. **지침상 문제 여부 및 남은 불확실성:** {esc(f['guideline_issues'])}")
-            st.markdown("5. **추가 증빙·확인 필요 사항:** " + (esc(" / ".join(f["additional_evidence"])) or "없음"))
-            st.markdown(f"6. **종합 검토 의견:** {STATUS_BADGE[f['final_status']]} — {esc(f['opinion'])}")
+            st.markdown(f"{STATUS_BADGE[f['final_status']]} **{esc(f['opinion'])}**")
+            rows = [("지침 검토", f["guideline_review"]), ("담당자 설명", f["user_explanation"]),
+                    ("남은 문제", f["guideline_issues"]), ("과거 사례(관행·지침 근거 아님)", f["related_past_cases"])]
+            st.markdown(labeled_rows(rows))
+            if f["additional_evidence"]:
+                st.markdown("**추가 증빙·확인**\n" + bullets(f["additional_evidence"]))
+
+
+def bullets(lines: list[str]) -> str:
+    return "\n".join(f"- {esc(x)}" for x in lines)
+
+
+def labeled_rows(rows: list[tuple[str, str]]) -> str:
+    """'라벨: 내용' 목록. 비어 있거나 '없음'인 칸은 표시하지 않는다."""
+    return "\n".join(f"- **{label}:** {esc(text)}" for label, text in rows if text and text.strip() not in ("없음", "-"))
 
 
 # ====================================================================== 화면 3. 저장된 사례

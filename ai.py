@@ -117,7 +117,14 @@ SYSTEM_PROMPT = """당신은 대학 교직원의 예산 집행 서류를 사전 
 4. 지침 간 우선순위를 "교육부 지침이 지자체 지침보다 항상 우선" 같은 단순 규칙으로 정하지 마세요.
    법적 효력, 적용 사업 범위, 위임관계, 사업별 예외, 협약조건을 함께 보고, 우선순위가 불명확하면 "판단 불가"로 두고 확인을 요청하세요.
 5. "적합"은 AI의 검토 의견일 뿐 법적 적정성을 보증하지 않습니다.
-6. 반드시 요청한 JSON 형식으로만 응답하고, 모든 설명은 한국어로 작성하세요."""
+6. 반드시 요청한 JSON 형식으로만 응답하고, 모든 설명은 한국어로 작성하세요.
+
+[작성 방식 - 간결하고 구조화된 표현]
+- 개조식으로 쓰세요: 핵심만, "~함", "~임", "~필요" 같은 명사형 종결. 인사말·서론·되풀이 요약·일반론("지침을 준수해야 합니다" 등) 금지.
+- 각 칸은 정해진 분량을 넘기지 마세요. 분량 표시는 최대치이며 짧을수록 좋습니다.
+- 다른 칸에 이미 쓴 내용을 반복하지 마세요. 칸마다 맡은 내용만 쓰세요.
+- 여러 사항을 나열할 때는 문장으로 잇지 말고 배열(목록) 칸을 쓰세요. 목록의 각 항목은 한 줄(40자 내외)입니다.
+- 금액·조항·날짜·사례 번호처럼 확인 가능한 구체 정보를 우선하여 쓰세요."""
 
 STATUS_DEFINITIONS = """검토 상태 정의:
 - "적합": 제공된 지침에서 해당 집행을 허용하는 근거가 확인되고 특별한 문제점이 발견되지 않음
@@ -169,20 +176,20 @@ def build_review_prompt(guidelines: list[dict], documents: list[dict]) -> str:
 출력 JSON 형식:
 {{
   "business_name": "사업명(문서에서 확인되지 않으면 '확인 불가')",
-  "document_summary": "문서 요약 1~2문장",
+  "document_summary": "문서 요약 1문장(60자 이내)",
   "items": [
     {{
       "item_no": 1,
       "expense_item": "집행항목명",
       "amount": 300000,
-      "purpose": "집행 목적 및 내용",
+      "purpose": "집행 목적 1구절(30자 이내)",
       "status": "적합 | 위반 가능성 | 판단 불가 중 하나",
-      "related_guidelines": [{{"guideline": "지침 파일명", "quote": "지침 원문 인용"}}],
-      "reasoning": "판단 근거 설명",
-      "unclear_points": ["추가 확인이 필요한 사항"]
+      "related_guidelines": [{{"guideline": "지침 파일명", "quote": "지침 원문 인용(판단에 필요한 1문장만)"}}],
+      "reasoning": "판단 근거 1~2문장(100자 이내). 인용문을 되풀이하지 말고 문서 내용과 지침 기준을 대조한 결론만",
+      "unclear_points": ["확인 필요 사항 1줄씩(40자 내외)"]
     }}
   ],
-  "guideline_priority_note": ""
+  "guideline_priority_note": "지침 간 적용 관계 문제 1~2문장(없으면 빈 문자열)"
 }}
 
 {_materials(w, guidelines, documents)}"""
@@ -199,8 +206,8 @@ def build_case_selection_prompt(business_name: str, flagged_items: list[dict], c
 {note}
 출력 JSON 형식:
 {{
-  "selected_cases": [{{"case_id": 1, "related_item_nos": [1], "reason": "선택 이유"}}],
-  "note": "관련 사례가 없으면 그 이유, 있으면 빈 문자열"
+  "selected_cases": [{{"case_id": 1, "related_item_nos": [1], "reason": "선택 이유 1문장(50자 이내)"}}],
+  "note": "관련 사례가 없으면 그 이유 1문장, 있으면 빈 문자열"
 }}
 
 {w("현재 검토 항목", "현재 문서", current)}
@@ -235,9 +242,10 @@ def build_question_prompt(guidelines, documents, review: dict, flagged_nos: list
 - '적합' 항목에는 질문하지 마세요.
 - 질문이 필요한 사유(reason_types)는 다음 중에서 고르세요:
   "지침에 명확한 기준 없음", "지침 간 우선순위 불명확", "지침과 실제 집행내용 불일치", "금액 산정 근거 불분명", "회의·재가·예외 승인 확인 필요", "과거 유사 사례와 다른 집행 방식"
-- 질문은 담당자가 바로 답할 수 있는 구체적인 자연어 문장으로 쓰세요. 한 질문에 확인할 사항을 2~3개까지 묶을 수 있습니다.
-  예: "현재 문서에서 자문수당 30만 원이 책정되어 있으나 등록된 지침에서는 해당 금액의 명확한 기준을 확인하지 못했습니다. 과거 유사 사업(사례 #1)에서는 사업단장 재가를 받아 집행한 기록이 있습니다. 이번 사업에서도 별도의 회의나 승인 절차를 거쳤나요?"
-- 과거 사례를 참고했다면 질문이나 past_case_comparison에 사례 번호와 당시 문서·답변 내용을 구체적으로 언급하세요.
+- 질문은 담당자가 바로 답할 수 있는 구체적인 문장으로, 배경 1문장 + 묻는 문장 1문장(합계 120자 이내)으로 쓰세요.
+  한 질문에 확인할 사항을 2~3개까지 묶을 수 있습니다. 배경 설명은 reason에 쓰고 질문에서 반복하지 마세요.
+  예: "자문수당 30만 원의 지침상 단가 기준이 없음. 단가를 정한 회의·사업단장 재가가 있었나요?"
+- 과거 사례를 참고했다면 past_case_comparison에 사례 번호와 당시 처리(결과·답변 핵심)를 짧게 쓰세요.
 - 과거 사례는 지침보다 우선하지 않습니다. 과거 사례가 지침과 충돌하면 그 점을 reason에 명시하세요.
 
 출력 JSON 형식:
@@ -245,11 +253,11 @@ def build_question_prompt(guidelines, documents, review: dict, flagged_nos: list
   "questions": [
     {{
       "item_no": 1,
-      "question": "담당자에게 할 질문",
-      "reason": "질문이 필요한 이유",
+      "question": "담당자에게 할 질문(120자 이내)",
+      "reason": "질문이 필요한 이유 1문장(80자 이내)",
       "reason_types": ["금액 산정 근거 불분명"],
       "referenced_case_ids": [1],
-      "past_case_comparison": "과거 사례와 비교한 내용(없으면 빈 문자열)"
+      "past_case_comparison": "예: '사례 #1: 동일 단가, 사업단장 재가로 집행' 1문장(없으면 빈 문자열)"
     }}
   ]
 }}
@@ -275,27 +283,29 @@ def build_final_prompt(guidelines, documents, review: dict, qa: list[dict], past
   과거에 같은 방식으로 집행했다는 사실은 적합의 근거가 아닙니다.
 - 답변이 "(답변 없음)"인 항목은 답변이 없다는 점을 반영하세요.
 - items에는 아래 질의응답의 모든 item_no를 포함하세요.
+- 칸별 역할을 지키고 서로 반복하지 마세요: guideline_review=지침 기준과의 대조, user_explanation=답변 요지,
+  guideline_issues=답변 반영 후에도 남은 문제만, opinion=결론과 조치 1문장. 1차 검토 결과 문장을 그대로 옮겨 쓰지 마세요.
 
 출력 JSON 형식:
 {{
   "items": [
     {{
       "item_no": 1,
-      "guideline_review": "지침 검토 결과",
-      "user_explanation": "담당자가 설명한 집행 사유 요약",
-      "related_past_cases": "관련 과거 사례와 당시 처리 내용(지침 근거와 구분하여)",
-      "guideline_issues": "지침상 문제 여부 및 남아 있는 불확실성",
-      "additional_evidence": ["추가 증빙 또는 확인이 필요한 사항"],
+      "guideline_review": "지침 기준 대비 판단 1~2문장(100자 이내)",
+      "user_explanation": "담당자 답변 요지 1문장(60자 이내)",
+      "related_past_cases": "예: '사례 #1: 동일 방식, 재가로 집행(관행일 뿐 지침 근거 아님)' 1문장(없으면 빈 문자열)",
+      "guideline_issues": "남은 문제·불확실성 1문장(없으면 '없음')",
+      "additional_evidence": ["추가로 받을 증빙·확인 사항 1줄씩"],
       "final_status": "적합 | 위반 가능성 | 판단 불가 중 하나",
-      "opinion": "종합 검토 의견"
+      "opinion": "결론과 필요한 조치 1문장(80자 이내)"
     }}
   ],
   "overall": {{
-    "summary": "주요 검토 내용",
-    "problem_items": "문제 가능성이 있는 항목 요약",
-    "past_cases_summary": "과거 유사 사례 요약",
-    "answer_reflection": "사용자 답변 반영 결과",
-    "additional_checks": ["추가 확인사항"]
+    "summary": "검토 결론 1~2문장(100자 이내)",
+    "problem_items": "문제 항목명과 상태 나열(예: '자문수당(위반 가능성), 식대(판단 불가)'). 없으면 '없음'",
+    "past_cases_summary": "참고한 사례 번호와 핵심 1문장(없으면 빈 문자열)",
+    "answer_reflection": "답변으로 바뀐 판정 요약 1문장(예: '식대: 판단 불가→적합')",
+    "additional_checks": ["추가 확인사항 1줄씩(항목별 additional_evidence와 중복 금지, 문서 전체에 해당하는 것만)"]
   }}
 }}
 
