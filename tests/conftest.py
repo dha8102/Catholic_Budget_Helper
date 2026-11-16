@@ -21,6 +21,8 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PAST_DOC_MAX_CHARS", 20_000)
     monkeypatch.setattr(config, "MAX_SELECTED_CASES", 5)
     monkeypatch.setattr(config, "MAX_FILE_MB", 20)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test-env")  # 실제 .env 키에 영향받지 않게
+    monkeypatch.setattr(config, "OPENAI_MODEL", "gpt-6-luna")
     storage.init_storage()
     return tmp_path / "data"
 
@@ -89,3 +91,13 @@ def final_response(status="판단 불가"):
         "overall": {"summary": "요약", "problem_items": "자문수당", "past_cases_summary": "",
                     "answer_reflection": "반영함", "additional_checks": ["재가 문서 확인"]},
     }
+
+
+NAV_KEYS = {"신규 문서 검토": "nav_review", "지침 관리": "nav_guidelines",
+            "저장된 사례": "nav_cases", "환경 설정": "nav_settings"}
+
+
+def goto(at, page):
+    """사이드바 메뉴 버튼을 눌러 화면을 이동한다."""
+    at.button(key=NAV_KEYS[page]).click().run()
+    return at

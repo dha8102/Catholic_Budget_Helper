@@ -327,6 +327,12 @@ def save_cases(records: list[dict], files: list[tuple[str, bytes]]) -> dict:
         conn.close()
 
 
+def update_case_review(case_id: int, review_result: str) -> None:
+    """저장된 사례의 검토 결과를 사람이 고친 내용으로 바꾼다."""
+    with _db() as conn:
+        conn.execute("UPDATE cases SET review_result = ? WHERE id = ?", [review_result, case_id])
+
+
 def delete_case(case_id: int) -> None:
     """사례를 삭제한다. 다른 사례가 같이 쓰는 파일은 남겨 둔다."""
     cases = list_cases()

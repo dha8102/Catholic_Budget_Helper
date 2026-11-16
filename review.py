@@ -198,8 +198,9 @@ def format_review_result(item: dict, final_item: dict | None) -> str:
     return "\n".join(lines)
 
 
-def build_case_records(state: dict) -> list[dict]:
-    """저장 대상만 고른다: 위반 가능성/판단 불가 + AI 질문 있음 + 사용자 답변 있음(최종 의견에 반영된 답변)."""
+def build_case_records(state: dict, item_nos: list[int] | None = None) -> list[dict]:
+    """저장 대상만 고른다: 위반 가능성/판단 불가 + AI 질문 있음 + 사용자 답변 있음(최종 의견에 반영된 답변).
+    item_nos를 주면 사용자가 저장하기로 선택한 항목만 남긴다."""
     final = state.get("final")
     if not final:
         return []
@@ -211,8 +212,11 @@ def build_case_records(state: dict) -> list[dict]:
         answer = final["answers"].get(q["item_no"], "").strip()
         if item["status"] not in FLAGGED or not q["question"] or not answer:
             continue
+        if item_nos is not None and q["item_no"] not in item_nos:
+            continue
         records.append(
             {
+                "item_no": q["item_no"],
                 "business_name": state["initial"]["business_name"],
                 "expense_item": item["expense_item"],
                 "amount": item["amount"],
@@ -224,13 +228,14 @@ def build_case_records(state: dict) -> list[dict]:
     return records
 
 
-def save_review(state: dict) -> dict:
-    """사례를 DB에 저장하고 업로드 문서를 로컬 폴더에 복사한다. 같은 검토를 두 번 저장하지 않는다."""
+def save_review(state: dict, item_nos: list[int] | None = None) -> dict:
+    """사례를 DB에 저장하고 업로드 문서를 로컬 폴더에 복사한다. 같은 검토를 두 번 저장하지 않는다.
+    item_nos를 주면 그 항목만 저장한다."""
     if state.get("saved"):
         return {**state["saved"], "already_saved": True}
-    records = build_case_records(state)
+    records = build_case_records(state, item_nos)
     if not records:
-        raise ValueError("저장할 사례가 없습니다. 위반 가능성·판단 불가 항목의 질문에 답변하고 최종 의견을 생성한 뒤 저장하세요.")
+        raise ValueError("저장할 사례가 없습니다. 위반 가능성·판단 불가 항목의 질문에 답변하고 최종 의견을 생성한 뒤, 저장할 항목을 선택하세요.")
     files = [(d["name"], d["data"]) for d in state["documents"]]
     result = storage.save_cases(records, files)
     state["saved"] = result

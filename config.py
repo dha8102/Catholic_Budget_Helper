@@ -29,5 +29,9 @@ MAX_SELECTED_CASES = _int_env("MAX_SELECTED_CASES", 5)
 # 업로드 파일 1개당 최대 크기(MB)
 MAX_FILE_MB = _int_env("MAX_FILE_MB", 20)
 
+# 웹 모드: 같은 네트워크의 여러 사람이 브라우저로 접속(로그인 없음, 데이터는 모두 공용).
+# AI 호출은 각 사용자가 화면에 입력한 API 키로만 한다. start_web.bat 이 WEB_MODE=1 로 실행한다.
+WEB_MODE = os.getenv("WEB_MODE", "").strip().lower() in ("1", "true", "yes")
+
 # 모든 로컬 데이터(지침, 사례 문서, SQLite DB)가 저장되는 폴더
 DATA_DIR = Path(os.getenv("ADMIN_AI_DATA_DIR", "").strip() or BASE_DIR / "data")
