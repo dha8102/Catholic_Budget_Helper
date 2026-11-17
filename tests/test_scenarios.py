@@ -15,7 +15,8 @@ PAST_DOC_MARKER = "2026. 5. 15. 사업단 내부 회의에서"  # 결과보고�
 def save_test2_case() -> dict:
     """테스트 2 흐름을 끝까지 실행해 사례를 저장하고 state를 돌려준다."""
     fake = FakeAI({
-        "guideline_review": review_response("자문회의 참석수당", "300,000원", "판단 불가", ADVISORY_QUOTE, ["산정 근거", "승인 여부"]),
+        "guideline_review": review_response("자문회의 참석수당", "300,000원", "판단 불가", ADVISORY_QUOTE, ["산정 근거", "승인 여부"],
+                                            keywords=["자문수당", "자문료", "단가산정근거", "사업단장재가"]),
         "questions": QUESTIONS,
         "final_opinion": final_response(),
     })
@@ -83,7 +84,9 @@ def test_3_reuses_past_case_and_reads_original_file(data_dir):
     state = review.new_state(load_doc("test3_유사자문수당/지출결의서_자문수당.txt"), [], load_guidelines())
     review.run_review(state, fake)
 
-    assert fake.tasks() == ["guideline_review", "case_selection", "questions"]
+    assert fake.tasks() == ["guideline_review", "case_selection", "questions"]  # 키워드가 이미 있어 키워드 추출 호출 없음
+    assert storage.get_case_index()[1]["keywords"] == ["자문수당", "자문료", "단가산정근거", "사업단장재가"]
+    assert [c["case_id"] for c in state["retrieval"]["candidates"]] == [1]  # 검색 후보로 사례 #1이 잡힘
     sel_prompt = fake.prompts("case_selection")[0]
     assert ANSWER_T2 in sel_prompt  # 2단계: DB 사례 전체(질문·답변)를 AI에 제공
     assert PAST_DOC_MARKER not in sel_prompt  # 2단계에서는 파일을 열지 않음
@@ -184,24 +187,6 @@ def test_input_over_limit_is_not_silently_truncated(data_dir, monkeypatch):
     with pytest.raises(ai.AIError, match="초과"):
         review.run_review(state, fake)
     assert fake.calls == []
-
-
-def test_too_many_cases_warns_and_uses_recent(data_dir, monkeypatch):
-    for i in range(30):
-        storage.save_cases([{"business_name": f"사업{i}", "expense_item": "자문수당", "amount": i, "review_result": "가" * 2000,
-                             "ai_question": "q", "user_answer": f"답변{i}"}], [])
-    monkeypatch.setattr(config, "MAX_INPUT_CHARS", 20_000)
-    fake = FakeAI({
-        "guideline_review": review_response("자문수당", 1, "판단 불가"),
-        "case_selection": {"selected_cases": []},
-        "questions": QUESTIONS,
-    })
-    state = review.new_state(load_doc("test2_자문수당/기안문_자문회의.txt"), [], load_guidelines())
-    review.run_review(state, fake)
-    prompt = fake.prompts("case_selection")[0]
-    assert len(prompt) <= 20_000
-    assert "답변29" in prompt and "답변0\"" not in prompt
-    assert any("최신" in w and "전체 30건" in w for w in state["warnings"])
 
 
 def test_bad_ai_response_can_be_retried_from_failed_step(data_dir):

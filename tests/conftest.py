@@ -1,5 +1,6 @@
 """테스트 공통 도구: 임시 data 폴더, 모의(가짜) AI, 샘플 파일 로더."""
 import copy
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,9 @@ EDU_GUIDELINE = "교육부_대학혁신지원사업_운영지침(가상).txt"
 def data_dir(tmp_path, monkeypatch):
     """실제 data 폴더 대신 임시 폴더를 쓴다. .env 설정값에 영향받지 않게 한도도 고정한다."""
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    # 실제 프로그램 폴더의 저장 폴더 설정 파일·예전 data 폴더를 건드리거나 읽지 않게 한다
+    monkeypatch.setattr(config, "LOCAL_SETTINGS", tmp_path / "local_settings.json")
+    monkeypatch.setattr(config, "LEGACY_DATA_DIR", tmp_path / "legacy_data")
     monkeypatch.setattr(config, "MAX_INPUT_CHARS", 300_000)
     monkeypatch.setattr(config, "PAST_DOC_MAX_CHARS", 20_000)
     monkeypatch.setattr(config, "MAX_SELECTED_CASES", 5)
@@ -27,17 +31,37 @@ def data_dir(tmp_path, monkeypatch):
     return tmp_path / "data"
 
 
-class FakeAI:
-    """task 이름별로 정해 둔 JSON을 돌려주는 모의 AI. 받은 프롬프트를 기록한다."""
+def fake_vector(text: str, dim: int = 256) -> list[float]:
+    """글자 2개 묶음을 해시해 만든 벡터. 비슷한 글은 비슷한 벡터가 되어 실제 임베딩처럼 동작한다."""
+    vec = [0.0] * dim
+    s = "".join(text.split())
+    for i in range(len(s) - 1):
+        vec[int(hashlib.md5(s[i:i + 2].encode()).hexdigest(), 16) % dim] += 1.0
+    return vec
 
-    def __init__(self, responses: dict):
+
+class FakeAI:
+    """task 이름별로 정해 둔 JSON을 돌려주는 모의 AI. 받은 프롬프트를 기록한다.
+    키워드 없는 옛 사례의 키워드 추출(case_keywords)은 따로 정하지 않으면 빈 결과를 돌려준다."""
+
+    def __init__(self, responses: dict, embed_error: Exception | None = None):
         self.responses = responses
         self.calls = []
+        self.embedded: list[str] = []  # 임베딩한 글 기록
+        self.embed_error = embed_error
 
     def complete_json(self, task, system, user):
         self.calls.append((task, system, user))
+        if task == "case_keywords" and task not in self.responses:
+            return {"cases": []}
         r = self.responses[task]
         return r(user) if callable(r) else copy.deepcopy(r)
+
+    def embed(self, texts):
+        if self.embed_error:
+            raise self.embed_error
+        self.embedded += list(texts)
+        return [fake_vector(t) for t in texts]
 
     def prompts(self, task):
         return [u for t, _, u in self.calls if t == task]
@@ -57,7 +81,7 @@ def load_guidelines() -> list[dict]:
 
 
 # ---------------------------------------------------------------- 모의 AI 응답
-def review_response(expense_item, amount, status, quote=None, unclear=None):
+def review_response(expense_item, amount, status, quote=None, unclear=None, keywords=None):
     refs = [{"guideline": EDU_GUIDELINE, "quote": quote}] if quote else []
     return {
         "business_name": "2026년 테스트 사업",
@@ -65,7 +89,7 @@ def review_response(expense_item, amount, status, quote=None, unclear=None):
         "items": [{
             "item_no": 1, "expense_item": expense_item, "amount": amount, "purpose": "테스트",
             "status": status, "related_guidelines": refs, "reasoning": "테스트 판단 근거",
-            "unclear_points": unclear or [],
+            "unclear_points": unclear or [], "keywords": keywords or [],
         }],
         "guideline_priority_note": "",
     }

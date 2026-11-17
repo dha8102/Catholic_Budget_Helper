@@ -42,7 +42,7 @@ def test_question_answer_final_save_flow(data_dir, monkeypatch):
     next(b for b in at.button if "최종 의견" in b.label).click()
     at.run()
     assert not at.exception
-    assert any("4. 최종 검토 의견" in s.value for s in at.subheader)
+    assert any("3. 최종 검토 의견" in s.value for s in at.subheader)
 
     save = next(b for b in at.button if "사례 DB 저장" in b.label)
     assert not save.disabled
@@ -101,9 +101,9 @@ def _two_item_state(fake):
 
 
 def test_compliant_items_hidden_and_save_selected_only(data_dir, monkeypatch):
-    questions = {"questions": [{**QUESTIONS["questions"][0], "item_no": 1}, {**QUESTIONS["questions"][0], "item_no": 3}]}
+    questions = {"questions": [{**QUESTIONS["questions"][0], "item_no": 1}, {**QUESTIONS["questions"][0], "item_no": 2}]}
     final = final_response()
-    final["items"].append({**final["items"][0], "item_no": 3})
+    final["items"].append({**final["items"][0], "item_no": 2})
     fake = FakeAI({"questions": questions, "final_opinion": final})
     monkeypatch.setattr(ai, "get_client", lambda **kw: fake)
     state = _two_item_state(fake)
@@ -115,11 +115,14 @@ def test_compliant_items_hidden_and_save_selected_only(data_dir, monkeypatch):
     assert not any("회의 식비" in t for t in titles)  # 적합 항목 카드는 표시하지 않음
     assert any("'적합' 판정 1개 항목은 표시하지 않습니다" in c.value for c in at.caption)
 
+    # 적합 항목(회의 식비)이 원래 2번째였지만 번호에서 빠져 확인 필요 항목은 1, 2로 빈틈없이 매겨진다
+    shown = [m.value for m in at.markdown if m.value.startswith("**항목 ")]
+    assert shown == ["**항목 1. 자문회의 참석수당**", "**항목 2. 다과비**"]
     at.text_area(key=f"answer_{state['id']}_1").input("재가 받음")
-    at.text_area(key=f"answer_{state['id']}_3").input("회의 후 다과 제공")
+    at.text_area(key=f"answer_{state['id']}_2").input("회의 후 다과 제공")
     next(b for b in at.button if "최종 의견" in b.label).click()
     at.run()
-    at.checkbox(key=f"save_sel_{state['id']}_3").uncheck()
+    at.checkbox(key=f"save_sel_{state['id']}_2").uncheck()
     at.run()
     next(b for b in at.button if "사례 DB 저장" in b.label).click()
     at.run()

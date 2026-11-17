@@ -97,7 +97,7 @@ def print_items(state: dict) -> None:
 
 
 def answer_all(state: dict, text: str) -> dict:
-    return {q["item_no"]: text for q in state["questions"]}
+    return {q["qid"]: text for q in state["questions"]}
 
 
 def main() -> int:
@@ -135,24 +135,34 @@ def main() -> int:
         r.check("테스트1", "질문이 생성되지 않음", not s["questions"])
         return summarize_state(s)
 
-    # 테스트 2: 지침에 없는 자문수당 → 판단 불가, 산정 근거·승인 질문, 저장
+    def no_submit_request(test: str, s: dict):
+        """질문이 '증빙 제출' 요구가 아니라 지침 요건 확인 형태인지 확인한다."""
+        bad = [q["question"] for q in s["questions"] if "제출" in q["question"]]
+        r.check(test, "질문이 증빙 제출을 요구하지 않음", not bad, " / ".join(bad)[:300])
+
+    # 테스트 2: 지침에 기준 없는 자문수당(집행 전 기안문만 검토) → 판단 불가, 사전 승인·산정 근거 확인 질문
+    #          → 답변 + 결과보고서를 답변 증빙으로 첨부 → 저장
+    # (결과보고서를 처음부터 함께 올리면 재가·산정 근거가 이미 적혀 있어 '적합'이 나오는 것이 지침상 맞으므로,
+    #  답변의 증빙으로 첨부한다.)
     def t2():
-        s = review.new_state(load_doc("test2_자문수당/기안문_자문회의.txt"), [load_doc("test2_자문수당/결과보고서_자문회의.docx")], guidelines)
+        s = review.new_state(load_doc("test2_자문수당/기안문_자문회의.txt"), [], guidelines)
         review.run_review(s, client)
         print_items(s)
         advisory = [i for i in s["initial"]["items"] if "자문" in i["expense_item"]]
         r.check("테스트2", "자문수당 항목이 '판단 불가'", advisory and all(i["status"] == "판단 불가" for i in advisory),
                 str([(i["expense_item"], i["status"]) for i in s["initial"]["items"]]))
-        # 증빙(결과보고서)에 산정 근거·재가가 이미 적혀 있으므로, AI가 이를 판단 근거에 반영했거나 질문으로 물으면 된다.
         qs = " ".join(q["question"] for q in s["questions"])
-        seen = qs + " " + " ".join(i["reasoning"] for i in advisory)
-        r.check("테스트2", "단가 산정 근거를 확인(판단 근거에 반영 또는 질문)", any(k in seen for k in ("산정", "단가")), seen[:300])
-        r.check("테스트2", "승인·재가 절차를 확인(판단 근거에 반영 또는 질문)", any(k in seen for k in ("승인", "재가")), seen[:300])
-        r.check("테스트2", "질문이 1개 이상 생성됨", bool(s["questions"]))
+        r.check("테스트2", "단가 산정 근거를 질문", any(k in qs for k in ("산정", "단가")), qs[:300])
+        r.check("테스트2", "사전 승인·재가 여부를 질문", any(k in qs for k in ("승인", "재가")), qs[:300])
+        no_submit_request("테스트2", s)
         if s["questions"]:
-            review.generate_final(s, answer_all(s, ANSWER_T2), client)
-            saved = review.save_review(s)
+            report = load_doc("test2_자문수당/결과보고서_자문회의.docx")
+            files = {q["qid"]: [report] for q in s["questions"]}  # 모든 질문에 같은 파일 첨부 → 한 번만 저장돼야 함
+            review.generate_final(s, answer_all(s, ANSWER_T2), client, files=files)
+            saved = review.save_review(s, client=client)
             r.check("테스트2", "사례 저장됨", bool(saved.get("saved_ids")), str(saved))
+            stored = [p for p in saved.get("file_paths", []) if p.endswith("결과보고서_자문회의.docx")]
+            r.check("테스트2", "답변 첨부 증빙(결과보고서) 1개만 저장됨", len(stored) == 1, str(saved.get("file_paths")))
         return summarize_state(s)
 
     # 테스트 3: 유사 자문수당 → 사례 #1 선택, 과거 원본(5/15 회의, 5/18 재가) 반영
@@ -160,13 +170,21 @@ def main() -> int:
         s = review.new_state(load_doc("test3_유사자문수당/지출결의서_자문수당.txt"), [], guidelines)
         review.run_review(s, client)
         print_items(s)
+        info = s.get("retrieval") or {}
+        print(f"  검색 키워드: {info.get('keywords')}")
+        for c in info.get("candidates", []):
+            print(f"  후보 #{c['case_id']} {c['expense_item']}: 키워드 {c['keyword_score']} {c['matched']} · 임베딩 {c['embedding_score']}")
         print(f"  선택된 사례: {[c['id'] for c in s['past_cases']]}")
+        r.check("테스트3", "검색 후보에 사례 #1 포함(키워드·임베딩 검색)", 1 in [c["case_id"] for c in info.get("candidates", [])], str(info)[:300])
+        r.check("테스트3", "키워드·임베딩 검색 모두 사례 #1을 찾음",
+                any(c["case_id"] == 1 and c["keyword_score"] and c["embedding_score"] is not None for c in info.get("candidates", [])), str(info)[:300])
         r.check("테스트3", "사례 #1 선택", 1 in [c["id"] for c in s["past_cases"]], str(s["selection"]))
         text = " ".join(q["question"] + " " + q["past_case_comparison"] for q in s["questions"])
         r.check("테스트3", "질문에 과거 사례 언급", any(k in text for k in ("#1", "사례 1", "과거")), text[:200])
         r.check("테스트3", "과거 회의·재가 내용 반영(5/15, 5/18 또는 재가)",
                 any(k in text for k in ("15일", "5/15", "5. 15", "18일", "5/18", "5. 18", "재가")), text[:200])
         r.check("테스트3", "50만 원 초과·위원회 심의 언급", any(k in text for k in ("50만", "500,000", "위원회", "심의")), text[:200])
+        no_submit_request("테스트3", s)
         return summarize_state(s)
 
     # 테스트 6: 잘못된 과거 사례(상품권)가 있어도 위반 가능성 유지
@@ -179,7 +197,7 @@ def main() -> int:
                 str([(i["expense_item"], i["status"]) for i in s1["initial"]["items"]]))
         if s1["questions"]:
             review.generate_final(s1, answer_all(s1, ANSWER_T6_1), client)
-            review.save_review(s1)
+            review.save_review(s1, client=client)
         s2 = review.new_state(load_doc("test6_잘못된과거사례/2차_지출결의서_상품권.txt"), [], guidelines)
         review.run_review(s2, client)
         print("  [2차 문서]")

@@ -7,6 +7,7 @@ import config
 
 STATUSES = ("적합", "위반 가능성", "판단 불가")
 FLAGGED = ("위반 가능성", "판단 불가")
+MAX_QUESTIONS_PER_ITEM = 4  # 한 집행항목에 대한 AI 질문 최대 개수
 
 
 class AIError(Exception):
@@ -29,37 +30,31 @@ class OpenAIClient:
         # 호출별 소요 시간·토큰 기록 (비용 확인용, scripts/live_check.py에서 사용)
         self.usage_log: list[dict] = []
 
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """문장들을 임베딩 벡터로 바꾼다(과거 사례 유사도 검색용). 입력 순서대로 돌려준다."""
+        import time
+
+        started = time.perf_counter()
+        vectors: list[list[float]] = []
+        tokens = 0
+        for i in range(0, len(texts), 100):  # 한 번에 너무 많이 보내지 않도록 100개씩
+            resp = self._call(lambda batch=texts[i:i + 100]: self.client.embeddings.create(model=config.EMBEDDING_MODEL, input=batch),
+                              model=config.EMBEDDING_MODEL, setting=".env의 EMBEDDING_MODEL")
+            vectors += [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
+            tokens += getattr(getattr(resp, "usage", None), "prompt_tokens", 0) or 0
+        self.usage_log.append({"task": "embedding", "seconds": round(time.perf_counter() - started, 1),
+                               "prompt_tokens": tokens, "completion_tokens": 0})
+        return vectors
+
     def complete_json(self, task: str, system: str, user: str) -> dict:
         import time
 
-        import openai
-
         started = time.perf_counter()
-        try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-                response_format={"type": "json_object"},
-            )
-        except openai.APITimeoutError:
-            raise AIError("AI 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.")
-        except openai.AuthenticationError:
-            raise AIError("OpenAI API 키 인증에 실패했습니다. .env 파일의 OPENAI_API_KEY를 확인하세요.")
-        except openai.RateLimitError:
-            raise AIError("OpenAI 사용량 한도 또는 잔액이 부족합니다. 잠시 후 다시 시도하거나 결제 상태를 확인하세요.")
-        except openai.APIConnectionError:
-            raise AIError("OpenAI 서버에 연결할 수 없습니다. 인터넷 연결을 확인하세요.")
-        except openai.NotFoundError:
-            raise AIError(f"모델 '{self.model}'을(를) 사용할 수 없습니다. .env의 OPENAI_MODEL을 계정에서 사용 가능한 모델로 바꾸세요.")
-        except openai.BadRequestError as e:
-            if getattr(e, "code", None) == "context_length_exceeded" or "context length" in str(e).lower():
-                raise AIError(
-                    f"입력 분량이 모델 '{self.model}'의 입력 한도를 초과했습니다. 검토에 사용할 지침 수를 줄이거나 문서를 나누세요. "
-                    "이 오류가 반복되면 .env의 MAX_INPUT_CHARS를 모델 한도보다 작게 낮추면 AI 호출 전에 미리 알려 줍니다."
-                )
-            raise AIError(f"AI 호출 중 오류가 발생했습니다: {e}")
-        except openai.OpenAIError as e:
-            raise AIError(f"AI 호출 중 오류가 발생했습니다: {e}")
+        resp = self._call(lambda: self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            response_format={"type": "json_object"},
+        ), model=self.model, setting="환경 설정의 AI 모델 또는 .env의 OPENAI_MODEL")
 
         usage = getattr(resp, "usage", None)
         self.usage_log.append({
@@ -72,6 +67,32 @@ class OpenAIClient:
         if choice.finish_reason == "length":
             raise AIFormatError("AI 응답이 길이 제한으로 잘렸습니다. 다시 시도하거나 문서 분량을 줄여 주세요.")
         return parse_json(choice.message.content or "")
+
+    def _call(self, fn, model: str, setting: str):
+        """OpenAI SDK 호출을 실행하고, 오류를 사용자에게 보여줄 안내 문구(AIError)로 바꾼다."""
+        import openai
+
+        try:
+            return fn()
+        except openai.APITimeoutError:
+            raise AIError("AI 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.")
+        except openai.AuthenticationError:
+            raise AIError("OpenAI API 키 인증에 실패했습니다. .env 파일의 OPENAI_API_KEY를 확인하세요.")
+        except openai.RateLimitError:
+            raise AIError("OpenAI 사용량 한도 또는 잔액이 부족합니다. 잠시 후 다시 시도하거나 결제 상태를 확인하세요.")
+        except openai.APIConnectionError:
+            raise AIError("OpenAI 서버에 연결할 수 없습니다. 인터넷 연결을 확인하세요.")
+        except openai.NotFoundError:
+            raise AIError(f"모델 '{model}'을(를) 사용할 수 없습니다. {setting}을(를) 계정에서 사용 가능한 모델로 바꾸세요.")
+        except openai.BadRequestError as e:
+            if getattr(e, "code", None) == "context_length_exceeded" or "context length" in str(e).lower():
+                raise AIError(
+                    f"입력 분량이 모델 '{model}'의 입력 한도를 초과했습니다. 검토에 사용할 지침 수를 줄이거나 문서를 나누세요. "
+                    "이 오류가 반복되면 .env의 MAX_INPUT_CHARS를 모델 한도보다 작게 낮추면 AI 호출 전에 미리 알려 줍니다."
+                )
+            raise AIError(f"AI 호출 중 오류가 발생했습니다: {e}")
+        except openai.OpenAIError as e:
+            raise AIError(f"AI 호출 중 오류가 발생했습니다: {e}")
 
 
 def get_client(api_key: str | None = None, model: str | None = None):
@@ -170,7 +191,12 @@ def build_review_prompt(guidelines: list[dict], documents: list[dict]) -> str:
 - 확인이 필요한 사항이 하나라도 있으면 "적합"이 아니라 "판단 불가" 또는 "위반 가능성"으로 분류하세요. "적합"은 unclear_points가 빈 배열일 때만 쓰세요.
 - related_guidelines의 quote는 지침 원문에서 그대로 복사한 문장이어야 합니다(요약·변형 금지). 근거가 없으면 빈 배열로 두세요.
 - amount는 원 단위 정수(쉼표, '원' 없이). 금액을 알 수 없으면 null.
-- unclear_points에는 담당자에게 확인이 필요한 사항을 적으세요. 적합 항목은 빈 배열입니다.
+- unclear_points에는 담당자에게 확인이 필요한 사항을 '지침 요건 중 문서에서 확인되지 않은 부분'으로 적으세요(예: "운영위원회 심의 여부", "단가 산정 기준").
+  "~ 증빙 제출 필요" 같은 서류 요구로 쓰지 마세요. 적합 항목은 빈 배열입니다.
+- 문서의 단계(계획서·기안문 등 집행 전 / 지출결의서·결과보고서 등 집행 후)를 고려하세요. 집행 전 문서에는 영수증·이체확인증·결과보고처럼
+  집행 후에야 생기는 서류가 없는 것이 정상이므로, 그것이 없다는 이유로 unclear_points를 만들거나 판정을 낮추지 마세요.
+- keywords에는 과거 유사 사례 검색에 쓸 핵심어를 3~8개 적으세요: 비목·지출 유형(예: 자문수당), 같은 뜻의 다른 표현(예: 자문료, 자문비),
+  쟁점(예: 단가 산정 근거, 사업단장 재가). 각 키워드는 띄어쓰기 없는 짧은 명사(2~10자)로 쓰고, 금액·날짜·사람 이름은 넣지 마세요.
 - 지침 간 적용 관계가 문제 되면 guideline_priority_note에 적으세요(문제 없으면 빈 문자열).
 
 출력 JSON 형식:
@@ -186,7 +212,8 @@ def build_review_prompt(guidelines: list[dict], documents: list[dict]) -> str:
       "status": "적합 | 위반 가능성 | 판단 불가 중 하나",
       "related_guidelines": [{{"guideline": "지침 파일명", "quote": "지침 원문 인용(판단에 필요한 1문장만)"}}],
       "reasoning": "판단 근거 1~2문장(100자 이내). 인용문을 되풀이하지 말고 문서 내용과 지침 기준을 대조한 결론만",
-      "unclear_points": ["확인 필요 사항 1줄씩(40자 내외)"]
+      "unclear_points": ["확인 필요 사항 1줄씩(40자 내외)"],
+      "keywords": ["자문수당", "자문료", "단가산정근거"]
     }}
   ],
   "guideline_priority_note": "지침 간 적용 관계 문제 1~2문장(없으면 빈 문자열)"
@@ -200,6 +227,7 @@ def build_case_selection_prompt(business_name: str, flagged_items: list[dict], c
     current = _dump({"business_name": business_name, "items": flagged_items})
     return f"""[작업 2: 과거 사례 선택]
 현재 문서에서 '위반 가능성' 또는 '판단 불가'로 분류된 집행항목과 유사하거나 참고할 가치가 있는 과거 사례를 고르세요.
+- 아래 목록은 저장된 사례 중 키워드 검색·임베딩(의미) 검색으로 추린 후보입니다. 검색 결과라도 실제로 관련이 없으면 고르지 마세요.
 - 최대 {max_cases}개까지 고르고, 관련 있는 사례가 없으면 selected_cases를 빈 배열로 두세요.
 - 반드시 아래 목록에 있는 case_id만 사용하세요.
 - 과거 사례는 참고자료일 뿐이며 지침에 어긋난 집행이었을 수도 있습니다. 그래도 참고 가치가 있으면 고르되 reason에 그 점을 적으세요.
@@ -238,13 +266,27 @@ def build_question_prompt(guidelines, documents, review: dict, flagged_nos: list
     w = Wrapper()
     return f"""[작업 3: 추가 질문 생성]
 1차 검토 결과, 공식 지침, 현재 문서, 과거 유사 사례(DB 기록과 당시 원본 문서)를 종합하여 담당자에게 물어볼 질문을 집행항목별로 작성하세요.
-- 질문 대상 item_no: {flagged_nos} ('위반 가능성' 또는 '판단 불가' 항목). 이 항목마다 질문을 정확히 1개씩 작성하세요.
+- 질문 대상 item_no: {flagged_nos} ('위반 가능성' 또는 '판단 불가' 항목). 이 항목마다 질문을 1~{MAX_QUESTIONS_PER_ITEM}개 작성하세요.
+  확인할 사항이 여러 개면 사항마다 질문을 따로 만드세요(같은 item_no로 여러 개). 각 질문은 한 가지 사항만 묻고, 질문끼리 겹치지 않게 하세요.
+  1차 검토의 unclear_points가 빠짐없이 질문으로 다뤄지게 하세요.
 - '적합' 항목에는 질문하지 마세요.
 - 질문이 필요한 사유(reason_types)는 다음 중에서 고르세요:
   "지침에 명확한 기준 없음", "지침 간 우선순위 불명확", "지침과 실제 집행내용 불일치", "금액 산정 근거 불분명", "회의·재가·예외 승인 확인 필요", "과거 유사 사례와 다른 집행 방식"
-- 질문은 담당자가 바로 답할 수 있는 구체적인 문장으로, 배경 1문장 + 묻는 문장 1문장(합계 120자 이내)으로 쓰세요.
-  한 질문에 확인할 사항을 2~3개까지 묶을 수 있습니다. 배경 설명은 reason에 쓰고 질문에서 반복하지 마세요.
-  예: "자문수당 30만 원의 지침상 단가 기준이 없음. 단가를 정한 회의·사업단장 재가가 있었나요?"
+
+[질문 작성 방식 - 가장 중요]
+- 질문은 "지침 기준 → 확인되지 않은 부분 → 확인 여부"를 묻는 형태로 쓰세요.
+  형식: "(지침/규정)에 따르면 (요건·기준)인데, (문서에서 확인되지 않은 부분)이 (충족·확인)되었습니까?"
+  예: "운영지침상 1인 50만 원 초과 자문수당은 운영위원회 심의 대상인데, 이번 1인 40만 원×2명 지급안은 심의를 거쳤습니까?"
+  예: "운영지침상 상품권 구매는 금지되어 있는데, 이번 상품권 구매가 예외 승인 대상에 해당하는지 확인되었습니까?"
+- 지침에 해당 기준이 없으면 그 사실을 밝히고 판단 근거를 물으세요.
+  예: "제공된 지침에 자문수당 단가 기준이 없는데, 2시간 30만 원 단가는 어떤 근거(내부 기준·회의 결정 등)로 정했습니까?"
+- 증빙자료 제출을 요구하지 마세요. "~를 제출해 주세요", "~를 제출할 수 있나요", "~자료가 있나요" 같은 질문은 금지입니다.
+  담당자는 사실 여부와 경위를 답하고, 필요하면 스스로 자료를 첨부합니다.
+- 문서의 단계를 먼저 파악하세요. 계획서·기안문·품의서처럼 집행 전 문서라면 영수증, 카드전표, 이체확인증, 결과보고서, 참석 확인 등
+  집행 후에야 생기는 사항은 묻지 마세요. 계획 단계에서 확인할 수 있는 것(지침 요건 충족 여부, 사전 승인·심의, 단가·산정 기준, 지급 대상 요건)만 물으세요.
+- 질문 1개는 한 가지 요건만 다루고, 지침 기준을 포함해 120자 이내로 쓰세요. 지침 인용 원문 전체를 옮기지 말고 요건만 요약하세요.
+- 1차 검토의 unclear_points가 증빙 제출 요구 형태로 적혀 있어도 그대로 옮기지 말고, 그 뒤에 있는 지침 요건 확인 질문으로 바꾸세요.
+  집행 전 문서에서 집행 후 증빙에 관한 unclear_points는 질문하지 않아도 됩니다.
 - 과거 사례를 참고했다면 past_case_comparison에 사례 번호와 당시 처리(결과·답변 핵심)를 짧게 쓰세요.
 - 과거 사례는 지침보다 우선하지 않습니다. 과거 사례가 지침과 충돌하면 그 점을 reason에 명시하세요.
 
@@ -253,7 +295,7 @@ def build_question_prompt(guidelines, documents, review: dict, flagged_nos: list
   "questions": [
     {{
       "item_no": 1,
-      "question": "담당자에게 할 질문(120자 이내)",
+      "question": "'(지침)에 따르면 ~인데, ~이 확인되었습니까?' 형태의 질문(120자 이내, 한 가지 요건만)",
       "reason": "질문이 필요한 이유 1문장(80자 이내)",
       "reason_types": ["금액 산정 근거 불분명"],
       "referenced_case_ids": [1],
@@ -269,7 +311,17 @@ def build_question_prompt(guidelines, documents, review: dict, flagged_nos: list
 {_materials(w, guidelines, documents)}"""
 
 
-def build_final_prompt(guidelines, documents, review: dict, qa: list[dict], past_cases: list[dict]) -> str:
+def _answer_files_block(w: Wrapper, evidence: list[dict] | None) -> str:
+    """evidence: [{"name", "text", "questions": ["1-1", ...]}] — 같은 파일은 한 번만 넣고 첨부된 질문 번호를 함께 적는다."""
+    parts = []
+    for f in evidence or []:
+        body = f["text"] if f.get("text") else "(텍스트를 추출하지 못한 파일 - 내용 확인 불가)"
+        parts.append(w(f"담당자 답변 첨부 증빙 - 질문 {', '.join(f['questions'])}", f["name"], body))
+    return "\n\n".join(parts) or w("담당자 답변 첨부 증빙", "없음", "첨부된 증빙이 없습니다.")
+
+
+def build_final_prompt(guidelines, documents, review: dict, qa: list[dict], past_cases: list[dict],
+                       evidence: list[dict] | None = None) -> str:
     w = Wrapper()
     return f"""[작업 4: 최종 검토 의견]
 담당자의 답변을 반영하여 집행항목별 최종 검토 의견과 종합 의견을 작성하세요.
@@ -281,8 +333,13 @@ def build_final_prompt(guidelines, documents, review: dict, qa: list[dict], past
   지침이 금지하거나 제한하는 지출은 내부 승인으로 정당화되지 않습니다.
 - 공식 지침에 따른 판단(guideline_review, guideline_issues)과 과거 집행 관행(related_past_cases)을 명확히 구분하세요.
   과거에 같은 방식으로 집행했다는 사실은 적합의 근거가 아닙니다.
-- 답변이 "(답변 없음)"인 항목은 답변이 없다는 점을 반영하세요.
-- items에는 아래 질의응답의 모든 item_no를 포함하세요.
+- 한 집행항목에 질문이 여러 개일 수 있습니다(question_no '항목-순번'). 항목별로 모든 질문의 답변을 종합해 판단하세요.
+  답변이 "(답변 없음)"인 질문은 그 사항이 확인되지 않았다는 점을 반영하세요.
+- 담당자가 답변과 함께 증빙을 첨부했다면(attached_evidence) 그 내용이 답변을 실제로 뒷받침하는지 확인하세요.
+  첨부만 있고 내용이 답변과 맞지 않거나 확인할 수 없으면 그 점을 guideline_issues에 적고, 증빙 내용이 지침을 대신하지는 않습니다.
+- 계획서·기안문 등 집행 전 문서라면 영수증·이체확인증·결과보고서가 없는 것을 문제로 보지 마세요.
+  additional_evidence에는 지금 단계에서 확인할 사항을 쓰고, 집행 후 서류는 필요하면 "집행 후: ~ 보관" 형태로 1줄만 쓰세요.
+- items에는 아래 질의응답에 나온 모든 item_no를 한 번씩 포함하세요.
 - 칸별 역할을 지키고 서로 반복하지 마세요: guideline_review=지침 기준과의 대조, user_explanation=답변 요지,
   guideline_issues=답변 반영 후에도 남은 문제만, opinion=결론과 조치 1문장. 1차 검토 결과 문장을 그대로 옮겨 쓰지 마세요.
 
@@ -312,6 +369,8 @@ def build_final_prompt(guidelines, documents, review: dict, qa: list[dict], past
 {w("1차 검토 결과", "작업 1 결과", _dump(review))}
 
 {w("추가 질문과 담당자 답변", "질의응답", _dump(qa))}
+
+{_answer_files_block(w, evidence)}
 
 {_past_cases_block(w, past_cases)}
 
@@ -374,7 +433,7 @@ def normalize_review(data: dict, guidelines: list[dict]) -> dict:
         raise AIFormatError("AI 응답에 집행항목 목록(items)이 없습니다. '다시 시도' 버튼을 눌러 주세요.")
     all_guidelines = _squash("".join(g["text"] for g in guidelines))
     items = []
-    for idx, raw in enumerate(items_raw, 1):
+    for raw in items_raw:
         if not isinstance(raw, dict):
             continue
         status = _status(raw.get("status"))
@@ -394,7 +453,7 @@ def normalize_review(data: dict, guidelines: list[dict]) -> dict:
             reasoning = (reasoning + " " if reasoning else "") + "(AI가 '적합'으로 표시했으나 확인이 필요한 사항이 있어 '판단 불가'로 분류함)"
         items.append(
             {
-                "item_no": idx,
+                "item_no": 0,  # 아래에서 다시 매긴다
                 "expense_item": _text(raw.get("expense_item")) or "(항목명 없음)",
                 "amount": parse_amount(raw.get("amount")),
                 "purpose": _text(raw.get("purpose")),
@@ -402,14 +461,60 @@ def normalize_review(data: dict, guidelines: list[dict]) -> dict:
                 "related_guidelines": refs,
                 "reasoning": reasoning,
                 "unclear_points": unclear,
+                "keywords": normalize_keywords(raw.get("keywords")),
             }
         )
+    # 번호는 확인이 필요한 항목(위반 가능성·판단 불가)에만 1, 2, 3... 으로 빈틈없이 매기고,
+    # 화면에 번호 없이 이름만 표시하는 '적합' 항목은 그 뒤로 보낸다.
+    items = [i for i in items if i["status"] in FLAGGED] + [i for i in items if i["status"] not in FLAGGED]
+    for no, item in enumerate(items, 1):
+        item["item_no"] = no
     return {
         "business_name": _text(data.get("business_name")) or "확인 불가",
         "document_summary": _text(data.get("document_summary")),
         "items": items,
         "guideline_priority_note": _text(data.get("guideline_priority_note")),
     }
+
+
+def normalize_keywords(v, limit: int = 10) -> list[str]:
+    """키워드 목록 정리: 공백 제거, 중복 제거, 너무 짧거나 긴 것 제외."""
+    out = []
+    for k in _text_list(v):
+        k = re.sub(r"\s+", "", k).strip(".,·'\"")
+        if 2 <= len(k) <= 20 and k not in out:
+            out.append(k)
+    return out[:limit]
+
+
+def build_case_keywords_prompt(cases: list[dict]) -> str:
+    """키워드 없이 저장된 과거 사례(이 기능 도입 전 사례 등)의 검색 키워드를 뽑는다."""
+    w = Wrapper()
+    return f"""[작업: 과거 사례 검색 키워드 추출]
+아래 과거 집행사례마다 유사 사례 검색에 쓸 핵심어를 3~8개 뽑으세요.
+- 비목·지출 유형(예: 자문수당), 같은 뜻의 다른 표현(예: 자문료, 자문비), 쟁점(예: 단가산정근거, 사업단장재가)을 포함하세요.
+- 각 키워드는 띄어쓰기 없는 짧은 명사(2~10자). 금액·날짜·사람 이름은 넣지 마세요.
+- 모든 case_id에 대해 답하세요.
+
+출력 JSON 형식:
+{{"cases": [{{"case_id": 1, "keywords": ["자문수당", "자문료", "단가산정근거"]}}]}}
+
+{w("과거 사례 목록", "cases", _dump(cases))}"""
+
+
+def normalize_case_keywords(data: dict, valid_ids: set[int]) -> dict[int, list[str]]:
+    out = {}
+    for c in data.get("cases") or []:
+        if not isinstance(c, dict):
+            continue
+        try:
+            cid = int(c.get("case_id"))
+        except (TypeError, ValueError):
+            continue
+        kws = normalize_keywords(c.get("keywords"))
+        if cid in valid_ids and kws:
+            out[cid] = kws
+    return out
 
 
 def normalize_selection(data: dict, valid_ids: set[int], max_cases: int) -> dict:
@@ -440,8 +545,9 @@ def normalize_questions(data: dict, review: dict) -> list[dict]:
     raw = data.get("questions")
     if not isinstance(raw, list):
         raise AIFormatError("AI 응답에 질문 목록(questions)이 없습니다. '다시 시도' 버튼을 눌러 주세요.")
+    """한 항목에 질문이 여러 개일 수 있다. 각 질문에 전체 일련번호 qid(1, 2, 3...)와 항목 안 순번 seq를 붙인다."""
     flagged = {i["item_no"]: i for i in review["items"] if i["status"] in FLAGGED}
-    by_item = {}
+    by_item: dict[int, list[dict]] = {no: [] for no in flagged}
     for q in raw:
         if not isinstance(q, dict):
             continue
@@ -449,31 +555,36 @@ def normalize_questions(data: dict, review: dict) -> list[dict]:
             no = int(q.get("item_no"))
         except (TypeError, ValueError):
             continue
-        if no not in flagged or no in by_item or not _text(q.get("question")):
-            continue  # 적합 항목 질문·중복 질문은 버린다
-        by_item[no] = {
-            "item_no": no,
-            "question": _text(q.get("question")),
+        text = _text(q.get("question"))
+        if no not in flagged or not text or len(by_item[no]) >= MAX_QUESTIONS_PER_ITEM:
+            continue  # 적합 항목 질문·한도 초과 질문은 버린다
+        if any(_squash(x["question"]) == _squash(text) for x in by_item[no]):
+            continue  # 같은 질문 중복
+        by_item[no].append({
+            "question": text,
             "reason": _text(q.get("reason")),
             "reason_types": _text_list(q.get("reason_types")),
             "referenced_case_ids": _int_list(q.get("referenced_case_ids") or []),
             "past_case_comparison": _text(q.get("past_case_comparison")),
             "auto_generated": False,
-        }
-    # AI가 빠뜨린 항목은 1차 검토의 확인사항으로 질문을 구성한다.
+        })
+    # AI가 빠뜨린 항목은 1차 검토의 확인사항을 하나씩 질문으로 만든다.
     for no, item in flagged.items():
-        if no not in by_item:
-            points = item["unclear_points"] or [item["reasoning"] or "집행 근거"]
-            by_item[no] = {
-                "item_no": no,
-                "question": f"'{item['expense_item']}' 항목에 대해 다음 사항을 설명해 주세요: " + " / ".join(points),
+        if not by_item[no]:
+            points = item["unclear_points"][:MAX_QUESTIONS_PER_ITEM] or [item["reasoning"] or "집행 근거"]
+            by_item[no] = [{
+                "question": f"'{item['expense_item']}' 항목에서 '{p}' 부분이 지침 요건에 맞게 확인되었습니까?",
                 "reason": "AI 응답에 이 항목의 질문이 없어 1차 검토의 확인사항으로 질문을 구성했습니다.",
                 "reason_types": [],
                 "referenced_case_ids": [],
                 "past_case_comparison": "",
                 "auto_generated": True,
-            }
-    return [by_item[no] for no in sorted(by_item)]
+            } for p in points]
+    out = []
+    for no in sorted(by_item):
+        for seq, q in enumerate(by_item[no], 1):
+            out.append({"qid": len(out) + 1, "item_no": no, "seq": seq, **q})
+    return out
 
 
 def normalize_final(data: dict, review: dict, answered_nos: list[int]) -> dict:

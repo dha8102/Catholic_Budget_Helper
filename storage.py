@@ -1,4 +1,5 @@
 """로컬 저장소: 폴더·SQLite 초기화, 파일 저장과 경로 검사, 텍스트 추출."""
+import hashlib
 import io
 import json
 import os
@@ -38,6 +39,113 @@ def db_path() -> Path:
     return data_dir() / "cases.db"
 
 
+# ---------------------------------------------------------------- 저장 폴더 변경·복사
+def folder_summary(path: Path) -> dict:
+    """폴더에 들어 있는 자료 수: {"cases": 사례 건수, "guidelines": 지침 파일 수, "documents": 저장 문서 수}"""
+    path = Path(path)
+    cases = 0
+    db = path / "cases.db"
+    if db.is_file():
+        try:
+            conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                cases = conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            cases = 0
+    count = lambda d: sum(1 for p in d.rglob("*") if p.is_file()) if d.is_dir() else 0  # noqa: E731
+    return {"cases": cases, "guidelines": count(path / "guidelines"), "documents": count(path / "documents")}
+
+
+def has_data(path: Path) -> bool:
+    return any(folder_summary(path).values())
+
+
+def _describe(s: dict) -> str:
+    return f"사례 {s['cases']}건 · 지침 {s['guidelines']}개 · 문서 {s['documents']}개"
+
+
+def copy_data(src: Path, dst: Path) -> dict:
+    """src 폴더의 사례 DB·문서·지침을 dst로 복사한다(원본은 그대로 둔다). dst에 이미 자료가 있으면 덮어쓰지 않고 오류.
+    DB에는 data 폴더 기준 상대경로가 저장되므로 폴더째 복사하면 파일 경로가 그대로 맞는다."""
+    src, dst = Path(src), Path(dst)
+    if has_data(dst):
+        raise ValueError(f"새 폴더에 이미 자료({_describe(folder_summary(dst))})가 있어 덮어쓰지 않았습니다. "
+                         "복사하지 않고 그 폴더를 그대로 쓰려면 '복사' 선택을 해제하세요.")
+    dst.mkdir(parents=True, exist_ok=True)
+    created = []
+    try:
+        for name in ("guidelines", "documents"):
+            if (src / name).is_dir():
+                shutil.copytree(src / name, dst / name, dirs_exist_ok=True)
+                created.append(dst / name)
+        if (src / "cases.db").is_file():
+            s, d = sqlite3.connect(src / "cases.db"), sqlite3.connect(dst / "cases.db")
+            created.append(dst / "cases.db")
+            try:
+                s.backup(d)  # 사용 중인 DB도 안전하게 통째로 복사
+            finally:
+                s.close()
+                d.close()
+    except Exception:
+        for p in created:  # 반쯤 복사된 자료를 남기지 않는다
+            shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
+        raise
+    return folder_summary(dst)
+
+
+def change_data_dir(new_path: str, copy: bool) -> str:
+    """저장 폴더를 바꾼다(이 PC 전체에 적용, local_settings.json에 기록). copy=True면 현재 폴더 자료를 먼저 복사한다.
+    실패하면 ValueError(사용자에게 보여줄 문구)이고, 저장 폴더는 바뀌지 않는다."""
+    raw = (new_path or "").strip().strip('"')
+    if not raw:
+        raise ValueError("새 저장 폴더 경로를 입력하세요.")
+    new = Path(raw).expanduser()
+    if not new.is_absolute():
+        raise ValueError(r"전체 경로를 입력하세요(예: C:\Catholic_Budget_Helper_DB).")
+    if new.exists() and not new.is_dir():
+        raise ValueError("입력한 경로가 폴더가 아니라 파일입니다.")
+    cur = data_dir()
+    if new.resolve() == cur.resolve():
+        raise ValueError("지금 사용 중인 폴더와 같습니다.")
+    if new.resolve().is_relative_to(cur.resolve()):
+        raise ValueError("지금 사용 중인 폴더 안쪽으로는 옮길 수 없습니다. 다른 위치를 고르세요.")
+    try:
+        new.mkdir(parents=True, exist_ok=True)
+        probe = new / ".write_test"
+        probe.write_bytes(b"ok")
+        probe.unlink()
+    except OSError as e:
+        raise ValueError(f"폴더를 만들거나 쓸 수 없습니다(권한을 확인하세요): {e}")
+    msg = f"저장 폴더를 '{new}'(으)로 바꿨습니다."
+    if copy and has_data(cur):
+        copied = copy_data(cur, new)
+        msg += f" 기존 자료를 복사했습니다: {_describe(copied)}. 원래 폴더 '{cur}'의 자료는 그대로 남아 있습니다."
+    elif has_data(new):
+        msg += f" 새 폴더에 있던 자료를 사용합니다: {_describe(folder_summary(new))}."
+    config.save_local_settings({"data_dir": str(new)})
+    config.DATA_DIR = new
+    init_storage()
+    return msg
+
+
+def import_legacy_data() -> str:
+    """예전 기본 폴더(프로젝트 안 data)의 자료를 지금 저장 폴더로 복사한다."""
+    copied = copy_data(config.LEGACY_DATA_DIR, data_dir())
+    init_storage()
+    return f"'{config.LEGACY_DATA_DIR}'의 자료를 '{data_dir()}'(으)로 복사했습니다: {_describe(copied)}."
+
+
+def legacy_data_waiting() -> dict | None:
+    """예전 기본 폴더에 자료가 있고 지금 저장 폴더는 비어 있으면 예전 폴더의 자료 수를 돌려준다."""
+    legacy = Path(config.LEGACY_DATA_DIR)
+    if not legacy.is_dir() or legacy.resolve() == data_dir().resolve():
+        return None
+    s = folder_summary(legacy)
+    return s if any(s.values()) and not has_data(data_dir()) else None
+
+
 @contextmanager
 def _db():
     conn = sqlite3.connect(db_path())
@@ -68,6 +176,16 @@ def init_storage() -> None:
                 user_answer TEXT,
                 file_paths TEXT,
                 created_at TEXT
+            )"""
+        )
+        # 과거 사례 검색용 색인: 사례별 키워드와 임베딩 벡터 (cases 테이블은 그대로 두고 따로 보관)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS case_index (
+                case_id INTEGER PRIMARY KEY,
+                keywords TEXT,
+                embedding BLOB,
+                embedding_model TEXT,
+                embedding_source TEXT
             )"""
         )
 
@@ -133,6 +251,11 @@ def resolve_case_file(rel_path: str) -> Path | None:
 
 def to_rel_path(full: Path) -> str:
     return full.resolve().relative_to(data_dir().resolve()).as_posix()
+
+
+def file_hash(data: bytes) -> str:
+    """파일 내용의 SHA-256 해시. 같은 파일을 여러 번 올렸는지 확인하는 데 쓴다."""
+    return hashlib.sha256(data).hexdigest()
 
 
 # ---------------------------------------------------------------- 텍스트 추출
@@ -269,6 +392,8 @@ def save_cases(records: list[dict], files: list[tuple[str, bytes]]) -> dict:
     """사례 여러 건과 관련 문서를 한 번에 저장한다.
 
     - 파일은 data/documents/case_XXX/ 폴더 하나에 한 번만 복사하고, 모든 사례가 같은 경로를 참조한다.
+    - record에 "extra_files"([(파일명, bytes)])가 있으면 같은 폴더에 저장하되 그 사례에만 연결한다(답변 첨부 증빙).
+    - 내용(해시)이 같은 파일은 여러 항목·질문에 첨부됐어도 한 번만 저장하고 같은 경로를 참조한다.
     - 이미 같은 내용의 사례가 있으면 새로 만들지 않는다(중복 저장 방지).
     - 중간에 오류가 나면 DB 기록과 복사한 파일을 모두 되돌린다.
     반환: {"saved_ids": [...], "duplicate_ids": [...], "file_paths": [...]}
@@ -308,14 +433,29 @@ def save_cases(records: list[dict], files: list[tuple[str, bytes]]) -> dict:
                 folder = documents_dir() / f"{base}_{n}"
                 n += 1
 
-        rel_paths = []
-        for name, data in files:
-            target = unique_path(folder, safe_filename(name))
-            target.write_bytes(data)
-            rel_paths.append(to_rel_path(target))
+        written: dict[str, str] = {}  # 파일 해시 → 저장 경로. 내용이 같은 파일은 이름이 달라도 한 번만 저장한다.
 
-        paths_json = json.dumps(rel_paths, ensure_ascii=False)
-        conn.executemany("UPDATE cases SET file_paths = ? WHERE id = ?", [(paths_json, i) for i in saved_ids])
+        def write(name: str, data: bytes) -> str:
+            digest = file_hash(data)
+            if digest not in written:
+                target = unique_path(folder, safe_filename(name))
+                target.write_bytes(data)
+                written[digest] = to_rel_path(target)
+            return written[digest]
+
+        common = list(dict.fromkeys(write(name, data) for name, data in files))  # 모든 사례가 함께 참조하는 문서
+        updates = []
+        for case_id, rec in zip(saved_ids, new_records):
+            # 해당 항목의 질문에 답하면서 첨부한 증빙은 그 사례에만 연결한다
+            own = [p for p in dict.fromkeys(write(name, data) for name, data in rec.get("extra_files") or []) if p not in common]
+            updates.append((json.dumps(common + own, ensure_ascii=False), case_id))
+        rel_paths = list(written.values())
+        conn.executemany("UPDATE cases SET file_paths = ? WHERE id = ?", updates)
+        # 검토 때 뽑은 키워드를 사례와 함께 저장 (임베딩은 저장 후 따로 만든다)
+        conn.executemany(
+            "INSERT OR REPLACE INTO case_index (case_id, keywords) VALUES (?, ?)",
+            [(i, json.dumps(rec["keywords"], ensure_ascii=False)) for i, rec in zip(saved_ids, new_records) if rec.get("keywords")],
+        )
         conn.commit()
         return {"saved_ids": saved_ids, "duplicate_ids": duplicate_ids, "file_paths": rel_paths}
     except Exception:
@@ -333,6 +473,39 @@ def update_case_review(case_id: int, review_result: str) -> None:
         conn.execute("UPDATE cases SET review_result = ? WHERE id = ?", [review_result, case_id])
 
 
+# ---------------------------------------------------------------- 사례 검색 색인 (키워드·임베딩)
+def get_case_index() -> dict[int, dict]:
+    """{case_id: {"keywords": [...], "embedding": bytes|None, "embedding_model", "embedding_source"}}"""
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM case_index").fetchall()
+    out = {}
+    for r in rows:
+        try:
+            kws = json.loads(r["keywords"] or "[]")
+        except json.JSONDecodeError:
+            kws = []
+        out[r["case_id"]] = {
+            "keywords": [k for k in kws if isinstance(k, str)] if isinstance(kws, list) else [],
+            "embedding": r["embedding"],
+            "embedding_model": r["embedding_model"],
+            "embedding_source": r["embedding_source"],
+        }
+    return out
+
+
+def set_case_keywords(case_id: int, keywords: list[str]) -> None:
+    with _db() as conn:
+        conn.execute("INSERT OR IGNORE INTO case_index (case_id) VALUES (?)", [case_id])
+        conn.execute("UPDATE case_index SET keywords = ? WHERE case_id = ?", [json.dumps(keywords, ensure_ascii=False), case_id])
+
+
+def set_case_embedding(case_id: int, vector: bytes, model: str, source: str) -> None:
+    with _db() as conn:
+        conn.execute("INSERT OR IGNORE INTO case_index (case_id) VALUES (?)", [case_id])
+        conn.execute("UPDATE case_index SET embedding = ?, embedding_model = ?, embedding_source = ? WHERE case_id = ?",
+                     [vector, model, source, case_id])
+
+
 def delete_case(case_id: int) -> None:
     """사례를 삭제한다. 다른 사례가 같이 쓰는 파일은 남겨 둔다."""
     cases = list_cases()
@@ -342,6 +515,7 @@ def delete_case(case_id: int) -> None:
     still_used = {p for c in cases if c["id"] != case_id for p in c["file_paths"]}
     with _db() as conn:
         conn.execute("DELETE FROM cases WHERE id = ?", [case_id])
+        conn.execute("DELETE FROM case_index WHERE case_id = ?", [case_id])
     for rel in target["file_paths"]:
         if rel in still_used:
             continue

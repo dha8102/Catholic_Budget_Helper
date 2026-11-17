@@ -48,14 +48,15 @@ def test_ai_uses_users_own_key(web, monkeypatch):
     goto(at, "환경 설정")
     at.text_input(key="set_api_key").input("sk-user-key")
     at.selectbox(key="set_model").set_value("gpt-5.5")
+    at.number_input(key="set_top_k").set_value(7)
     next(b for b in at.button if b.label == "설정 저장").click()
     at.run()
     assert not at.exception
-    assert at.session_state["settings"] == {"api_key": "sk-user-key", "model": "gpt-5.5", "theme": "System"}
+    assert at.session_state["settings"] == {"api_key": "sk-user-key", "model": "gpt-5.5", "theme": "System", "top_k": 7}
 
     goto(at, "신규 문서 검토")
     next(b for b in at.button if b.label == button).click()
     at.run()
     assert not at.exception
     assert keys == [{"api_key": "sk-user-key", "model": "gpt-5.5"}]
-    assert any("4. 최종 검토 의견" in s.value for s in at.subheader)
+    assert any("3. 최종 검토 의견" in s.value for s in at.subheader)

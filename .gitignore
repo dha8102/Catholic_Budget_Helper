@@ -3,6 +3,8 @@
 
 # 로컬 데이터(지침, 사례 DB, 첨부 문서) - 외부에 공개하지 않음
 data/
+# 이 PC의 저장 폴더 설정(환경 설정 화면에서 저장)
+local_settings.json
 
 # Python
 .venv/
