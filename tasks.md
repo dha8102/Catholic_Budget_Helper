@@ -132,11 +132,20 @@ AI 기반 대학 행정지침 검토 및 집행사례 관리 시스템의 개발
 - [x] 예전 `data/`에 자료가 있고 새 폴더가 비어 있으면 모든 화면 위에 '이전 폴더 자료 가져오기' 버튼 표시
 - [x] 자동 테스트 96개 통과 (14개 추가)
 
+### 16단계: 아무것도 설치 안 된 PC에서 바로 실행 (2026-11-25)
+- [x] `start.bat`: Python 3.11+가 없으면 `scripts\bootstrap.ps1`이 uv(버전 0.13.7 고정, SHA-256 확인)를 `.tools\uv`에 내려받고, uv가 Python 3.12를 `.tools\python`에 내려받아 `.venv` 생성. 관리자 권한·설치·PATH 변경 없음. `.tools/`는 git 제외
+- [x] 패키지 설치 표시를 `requirements.txt` 해시로 관리(`scripts\deps_marker.py`) → 프로그램 업데이트로 패키지가 추가되면 자동 재설치 (예전 `installed.ok`는 한 번 재설치)
+- [x] uv가 있으면 패키지도 uv로 설치(빠름), 없으면 pip
+- [x] 첫 실행 시 메모장으로 `.env`를 열던 단계 제거 → API 키는 화면 '환경 설정'에서 입력. `live_check.bat`은 `.env`에 키가 없을 때만 메모장 열기
+- [x] 검증: Python 없는 상태의 복사본에서 bootstrap → 패키지 설치 → 앱 실행(health ok)까지 확인
+- 참고: 첫 실행은 인터넷 필요(github.com·pypi.org, 약 300MB). 인터넷이 막힌 PC용 오프라인 묶음(zip)은 필요하면 별도 제작
+
 ---
 
 ## 2. 앞으로 할 일
 
 ### 사용자 확인 필요
+- [ ] Python이 없는 다른 PC에서 GitHub의 Download ZIP으로 받은 폴더의 `start.bat` 더블클릭 → 자동 준비 후 브라우저가 열리는지 확인 (학교 방화벽이 github.com·pypi.org를 막는지 포함)
 - [ ] 프로그램 재시작 후 화면 위 '이전 폴더 자료 가져오기'를 눌러 기존 `data/`의 사례 6건·지침 4개·문서 2개를 `C:\Catholic_Budget_Helper_DB`로 가져오기 (가져온 뒤 확인되면 예전 `data/`는 백업 후 정리 가능)
 - [ ] `gpt-6-luna`의 입력 한도(토큰)를 확인해 `.env`의 `MAX_INPUT_CHARS`를 그보다 작게 설정 (한국어 1글자 ≈ 1토큰, 예: 128k 모델이면 100000). 현재 300000
 - [ ] `gpt-6-luna` 단가를 확인해 비용 계산 (`scripts\live_check.py --price-in .. --price-out ..`)

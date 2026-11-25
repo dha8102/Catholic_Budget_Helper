@@ -8,6 +8,8 @@ local_settings.json
 
 # Python
 .venv/
+# start.bat이 내려받는 전용 Python·uv (Python이 없는 PC에서 자동 생성)
+.tools/
 __pycache__/
 *.pyc
 .pytest_cache/
